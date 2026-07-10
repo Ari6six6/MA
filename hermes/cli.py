@@ -364,10 +364,16 @@ def cmd_go_status(cfg, args: str) -> None:
     for space, entry in sorted(active.items()):
         elapsed = int(time.time() - entry.get("started_epoch", time.time()))
         run_id = entry.get("run_id")
-        run_label = f"run {run_id:04d}" if run_id else "run ?"
+        run_label = f"run {run_id:04d}" if run_id else "run ?   "
+        elapsed_label = f"{elapsed // 60}m{elapsed % 60:02d}s"
+        kind_field = f"{entry.get('kind', 'go'):<5}"
+        space_field = f"{space:<14}"
         pid_label = f"pid {entry['pid']}"
-        print(f"  {cyan(space)}  {dim(entry.get('kind', 'go'))}  {run_label}  "
-              f"{elapsed // 60}m{elapsed % 60:02d}s  {dim(pid_label)}")
+        # Pad the plain text first, then colorize — padding a string that
+        # already has ANSI codes in it counts the escape bytes as width and
+        # throws the columns off whenever color is on.
+        print(f"  {cyan(space_field)}{dim(kind_field)}"
+              f"{run_label:<9}{elapsed_label:<8}{dim(pid_label)}")
 
 
 def cmd_project(cfg, args: str) -> None:
@@ -986,18 +992,12 @@ def cmd_tools(cfg) -> None:
 
 
 HELP = f"""\
-{cyan('go')} <text>             {bold('the one command')} — no project ceremony: runs
-                     in a detached background process against the current
-                     space (auto-created if you have none), survives closing
-                     the phone, hard-capped at {GO_MAX_RUN_SECONDS // 60} min
-{cyan('go')} attach [space]      watch a running `go` live (narration + inner
-                     voice) — Ctrl-C detaches, it keeps running
+{cyan('go')} <text>             background run, no project ceremony, capped at {GO_MAX_RUN_SECONDS // 60} min
+{cyan('go')} attach [space]     watch it live (narration + inner voice) — Ctrl-C to detach
 {cyan('go')} say [space] <text>  send it a message while it's running
-{cyan('go')} status              list what's running
-{cyan('run')} <text>            the old foreground way — narrated turn by turn,
-                     requires a selected project {dim('(alias: r)')}
-{cyan('space')} / {cyan('project')} new|use|list  a space IS a project — same files on
-                     disk, `go` just never makes you pick one {dim('(alias: p)')}
+{cyan('go')} status             list what's running
+{cyan('run')} <text>            foreground, narrated turn by turn, needs a selected project {dim('(alias: r)')}
+{cyan('space')} / {cyan('project')} new|use|list  a space IS a project, same files on disk {dim('(alias: p)')}
 {cyan('mission')} [edit]        show/edit the project mission
 {cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
 {cyan('directives')} [edit|reconcile]  standing instructions distilled from history
