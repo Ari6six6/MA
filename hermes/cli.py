@@ -244,10 +244,12 @@ def cmd_run(cfg, args: str) -> None:
 
 
 def cmd_go(cfg, args: str) -> None:
-    """The one command: no project ceremony (auto-creates/uses the default
-    space), runs in a detached background process — survives closing the
-    phone — hard-capped at GO_MAX_RUN_SECONDS. `go attach` watches it live,
-    `go say` talks to it while it's running, `go status` checks on it."""
+    """The one verb for a space: say something. Nothing running yet? It
+    starts, and you watch it live. Something already running? What you typed
+    gets woven straight into that conversation, and you watch it land — no
+    separate `say` step needed for the common case. Either way you're looking
+    at it happen in real time; Ctrl-C is the only way to step back, and it
+    keeps running when you do (survives closing the terminal entirely)."""
     parts = args.split(maxsplit=1)
     sub, rest = (parts[0], parts[1] if len(parts) > 1 else "") if parts else ("", "")
     if sub == "attach":
@@ -260,23 +262,32 @@ def cmd_go(cfg, args: str) -> None:
         cmd_go_status(cfg, rest)
         return
 
-    prompt = args.strip()
-    if not prompt:
-        print(dim("usage: go <prompt>  |  go attach [space]  |  "
-                   "go say [space] <text>  |  go status"))
-        return
+    text = args.strip()
     project = _ensure_space(cfg)
     busy = go_state.active_entry(project.name)
+
     if busy:
-        print(yellow(f"'{project.name}' is busy") + dim(
-            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
+        if not busy.get("inbox_path"):
+            print(yellow(f"'{project.name}' is running in the foreground elsewhere") + dim(
+                " — nothing to watch or send to here."))
+            return
+        if text:
+            _go_append_inbox(project.name, busy, text)
+        else:
+            print(dim(f"— already working in '{project.name}' — watching it live —"))
+        _go_tail(project.name, busy)
+        return
+
+    if not text:
+        print(dim("usage: go <prompt>  |  go attach [space]  |  "
+                   "go say [space] <text>  |  go status"))
         return
     prepared = _prepare_run(cfg)  # fast fail here; the worker rebuilds its own gpu/sandbox/env/backend
     if prepared is None:
         return
 
     prompt_file = go_state.prompt_tmp_path(project.name)
-    prompt_file.write_text(prompt)
+    prompt_file.write_text(text)
     log_p = go_state.log_path(project.name)
     inbox_p = go_state.inbox_path(project.name)
     inbox_p.unlink(missing_ok=True)  # discard stale unread messages from a previous run in this space
@@ -293,27 +304,26 @@ def cmd_go(cfg, args: str) -> None:
             return
 
     go_state.start_entry(project.name, proc.pid, kind="go", log=str(log_p), inbox=str(inbox_p))
-    print(dim(f"→ working in '{project.name}' in the background (pid {proc.pid}, "
-               f"hard cap {GO_MAX_RUN_SECONDS // 60} min) — "
-               "`go attach` to watch live, `go say <text>` to send a message, "
-               "`go status` to check."))
+    print(dim(f"— '{project.name}' (pid {proc.pid}, hard cap {GO_MAX_RUN_SECONDS // 60} min) "
+               "— watching it live, Ctrl-C to leave it running in the background —"))
+    _go_tail(project.name, go_state.active_entry(project.name))
 
 
 def _go_target_space(cfg, name: str) -> str:
     return name.strip() or cfg.get("current_project") or DEFAULT_SPACE
 
 
-def cmd_go_attach(cfg, args: str) -> None:
-    space = _go_target_space(cfg, args)
-    entry = go_state.active_entry(space)
-    if entry is None:
-        print(yellow(f"nothing running in '{space}'"))
-        return
-    if not entry.get("log_path"):
-        print(yellow(f"'{space}' is running in the foreground elsewhere") + dim(" — nothing to attach to."))
-        return
+def _go_append_inbox(space: str, entry: dict, text: str) -> None:
+    line = json.dumps({"ts": time.strftime("%Y-%m-%d %H:%M"), "text": text.strip()})
+    with open(entry["inbox_path"], "a") as f:
+        f.write(line + "\n")
+    print(green(f"→ sent to '{space}'") + dim(" — picking it up now:"))
+
+
+def _go_tail(space: str, entry: dict) -> None:
+    """Stream a running space's log live until it finishes or the operator
+    Ctrl-Cs out — the shared engine behind `go`, `go say`, and `go attach`."""
     log_p = Path(entry["log_path"])
-    print(dim(f"— attached to '{space}' (pid {entry['pid']}) — Ctrl-C to detach, it keeps running —"))
     pos = 0
     try:
         while True:
@@ -333,6 +343,19 @@ def cmd_go_attach(cfg, args: str) -> None:
         print(dim(f"\n(detached — '{space}' keeps running in the background)"))
 
 
+def cmd_go_attach(cfg, args: str) -> None:
+    space = _go_target_space(cfg, args)
+    entry = go_state.active_entry(space)
+    if entry is None:
+        print(yellow(f"nothing running in '{space}'"))
+        return
+    if not entry.get("log_path"):
+        print(yellow(f"'{space}' is running in the foreground elsewhere") + dim(" — nothing to attach to."))
+        return
+    print(dim(f"— attached to '{space}' (pid {entry['pid']}) — Ctrl-C to detach, it keeps running —"))
+    _go_tail(space, entry)
+
+
 def cmd_go_say(cfg, args: str) -> None:
     active = go_state.list_active()
     parts = args.split(maxsplit=1)
@@ -350,10 +373,8 @@ def cmd_go_say(cfg, args: str) -> None:
     if not entry.get("inbox_path"):
         print(yellow(f"'{space}' is running in the foreground elsewhere") + dim(" — no inbox to send to."))
         return
-    line = json.dumps({"ts": time.strftime("%Y-%m-%d %H:%M"), "text": text.strip()})
-    with open(entry["inbox_path"], "a") as f:
-        f.write(line + "\n")
-    print(green(f"sent to '{space}'") + dim(" — it'll pick this up at the next turn boundary."))
+    _go_append_inbox(space, entry, text)
+    _go_tail(space, entry)
 
 
 def cmd_go_status(cfg, args: str) -> None:

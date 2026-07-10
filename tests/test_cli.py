@@ -29,10 +29,11 @@ class _FakeProc:
         self.pid = pid
 
 
-def test_go_spawns_detached_subprocess(cfg, capsys, monkeypatch):
+def test_go_spawns_detached_subprocess_and_watches_it(cfg, capsys, monkeypatch):
     cfg.set("backend", "mock")
     cfg.save()
     captured = {}
+    tailed = {}
 
     def fake_popen(argv, **kwargs):
         captured["argv"] = argv
@@ -42,8 +43,11 @@ def test_go_spawns_detached_subprocess(cfg, capsys, monkeypatch):
     # Isolate this test to argv/state-file wiring — real GPU/sandbox probing
     # (_prepare_run) shells out via subprocess.run, which shares the same
     # module-level Popen we're faking, so skip it rather than fake that too.
+    # _go_tail is stubbed too — it's a blocking live loop, covered separately
+    # by the attach tests.
     monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, None))
     monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(cli, "_go_tail", lambda space, entry: tailed.setdefault("space", space))
 
     cli.cmd_go(cfg, "hello there")
 
@@ -54,6 +58,7 @@ def test_go_spawns_detached_subprocess(cfg, capsys, monkeypatch):
     assert argv[4] == cli.DEFAULT_SPACE
     assert "hello there" in open(argv[5]).read()  # prompt written to the file the worker reads
     assert captured["kwargs"]["start_new_session"] is True
+    assert tailed["space"] == cli.DEFAULT_SPACE  # it watches what it just started
 
     entry = go_state.active_entry(cli.DEFAULT_SPACE)
     assert entry is not None
@@ -62,22 +67,29 @@ def test_go_spawns_detached_subprocess(cfg, capsys, monkeypatch):
     go_state.clear_entry(cli.DEFAULT_SPACE)
 
     out = capsys.readouterr().out
-    assert "background" in out and "attach" in out and "say" in out and "status" in out
+    assert "watching it live" in out
 
 
-def test_go_reports_busy_via_state_file(cfg, capsys, monkeypatch):
+def test_go_on_busy_space_sends_and_watches_instead_of_spawning(cfg, capsys, monkeypatch):
     cfg.set("backend", "mock")
     cfg.save()
     project = cli._ensure_space(cfg)
-    go_state.start_entry(project.name, os.getpid(), kind="go")  # os.getpid() is always alive
+    inbox = go_state.inbox_path(project.name)
+    go_state.start_entry(project.name, os.getpid(), kind="go",  # os.getpid() is always alive
+                          log=str(go_state.log_path(project.name)), inbox=str(inbox))
+    tailed = {}
 
     def fail_popen(*a, **k):
         raise AssertionError("should not spawn a second background run while one is busy")
 
     monkeypatch.setattr(cli.subprocess, "Popen", fail_popen)
+    monkeypatch.setattr(cli, "_go_tail", lambda space, entry: tailed.setdefault("space", space))
 
     cli.cmd_go(cfg, "another one")
-    assert "busy" in capsys.readouterr().out
+
+    assert json.loads(inbox.read_text().splitlines()[0])["text"] == "another one"
+    assert tailed["space"] == project.name  # dropped straight into watching it, not a flat refusal
+    assert "sent" in capsys.readouterr().out
     go_state.clear_entry(project.name)
 
 
@@ -120,17 +132,20 @@ def test_go_say_nothing_running(cfg, capsys):
     assert not go_state.inbox_path(cli.DEFAULT_SPACE).exists()  # no dangling inbox for a no-op
 
 
-def test_go_say_appends_to_inbox(cfg, tmp_path, capsys):
+def test_go_say_appends_to_inbox_and_watches_it_land(cfg, tmp_path, capsys, monkeypatch):
     project = cli._ensure_space(cfg)
     inbox = go_state.inbox_path(project.name)
     go_state.start_entry(project.name, os.getpid(), kind="go",
                           log=str(tmp_path / "x.log"), inbox=str(inbox))
+    tailed = {}
+    monkeypatch.setattr(cli, "_go_tail", lambda space, entry: tailed.setdefault("space", space))
 
     cli.cmd_go_say(cfg, "keep going")
 
     lines = inbox.read_text().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["text"] == "keep going"
+    assert tailed["space"] == project.name  # `say` watches it land, doesn't just fire and forget
     assert "sent" in capsys.readouterr().out
     go_state.clear_entry(project.name)
 
