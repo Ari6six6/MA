@@ -21,6 +21,10 @@ reaches:
 
 ### ▶ Start here
 
+Already set up and just want to use it? **[docs/QUICKSTART.md](docs/QUICKSTART.md)**
+is the whole program on one page: one verb (`go`), the GPU, the mission, and where
+your files live.
+
 New, or setting up a box from scratch? **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**
 is the A-to-Z: fresh VPS → first run, in order, from a phone over SSH. The rest of
 this README is reference.

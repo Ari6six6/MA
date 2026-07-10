@@ -1101,29 +1101,48 @@ def cmd_tools(cfg) -> None:
         print(f"  {cyan(name)}: {t.description[:90]}")
 
 
+# The whole program in five lines. `help more` opens everything else — it's all
+# still there, just out of the way until you want it.
 HELP = f"""\
-{cyan('session')} [text]         live session you sit in WITH the agent, up to {GO_MAX_RUN_SECONDS // 60} min, you drive {dim('(alias: s)')}
-{cyan('go')} <text>             detached background run (survives closing the phone), capped at {GO_MAX_RUN_SECONDS // 60} min
-{cyan('go')} attach [space]     watch a background run live — Ctrl-C to detach
-{cyan('go')} say [space] <text>  send a background run a message — and how you answer when it asks you something
+{bold('What you actually need:')}
+
+  {cyan('go')} <what you want done>
+      Start a {GO_MAX_RUN_SECONDS // 60}-minute work session and watch it happen. It runs in the
+      background (survives closing the phone), narrating as it goes, and it can
+      stop to ask YOU a question. Type {cyan('go')} <more> any time to steer it while
+      it works. {dim('Ctrl-C steps out and leaves it running; `go` again to drop back in.')}
+
+  {cyan('go')}                    drop back into whatever's running (or see the usage)
+  {cyan('go status')}             what's running right now
+  {cyan('gpu attach')}            connect a GPU        {cyan('gpu serve')}   load the model onto it
+  {cyan('mission')} [edit]        the standing brief the agent always sees
+  {cyan('help more')}             everything else      {cyan('quit')}      leave
+"""
+
+# Everything the essentials view leaves out. Power is all here; it just isn't in
+# your face every time you open the program.
+HELP_MORE = f"""\
+{bold('Starting work')}
+{cyan('go')} <text>             background {GO_MAX_RUN_SECONDS // 60}-min session you watch + steer live (survives closing the phone)
+{cyan('go')} say [space] <text>  steer a background session (also how you answer when it asks you something)
+{cyan('go')} attach [space]     drop into a running session's live view — Ctrl-C to step out
 {cyan('go')} status             list what's running
-{cyan('run')} <text>            single foreground exchange, needs a selected project {dim('(alias: r)')}
-{cyan('space')} / {cyan('project')} new|use|list  a space IS a project, same files on disk {dim('(alias: p)')}
-{cyan('mission')} [edit]        show/edit the project mission
-{cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
-{cyan('directives')} [edit|reconcile]  standing instructions distilled from history
-{cyan('skills')} [show|edit <name>]  the agent's reusable how-to notes
-{cyan('checkpoint')} [restore <id>]  project snapshots before file-mutating turns
-{cyan('retrospect')} [now]      per-run metrics + the cross-run self-review pass
-{cyan('tools')}                 list the agent's tools
+{cyan('session')} [text]        sit WITH it in the foreground the whole time instead {dim('(alias: s)')}
+{cyan('run')} <text>            one foreground exchange, then back to the prompt {dim('(alias: r)')}
+
+{bold('Where your work lives')}
+{cyan('space')} / {cyan('project')} new|use|list  a space is just a folder of your work (mission, files, run history) {dim('(alias: p)')}
+{cyan('mission')} [edit]        the standing brief   ·   {cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
+{cyan('checkpoint')} [restore <id>]  snapshots taken before the agent changes files
+
+{bold('The GPU')}
 {cyan('gpu')} attach [sshstr] | serve | status | tunnel | down   {dim('(alias: g)')}
-{cyan('host')} add <name> <sshstr> [note] | list | rm <name>     your real servers
-{cyan('sandbox')} status | provision                            the local box where the exec container runs
-{cyan('persona')} edit          edit the persona appended to the system prompt
-{cyan('debug')} prefix          measure the prefix-cache-shared bytes across two packages
-{cyan('config')} [key [value]]  view/set configuration
-{cyan('allow')} [list] | add <domain> [methods] | rm <domain>   persistent http_request auto-approve
-{cyan('quit')}                  exit
+
+{bold('Deeper')}
+{cyan('directives')} [edit|reconcile]  ·  {cyan('skills')} [show|edit <name>]  ·  {cyan('retrospect')} [now]  ·  {cyan('tools')}
+{cyan('host')} add <name> <sshstr> [note] | list | rm    your real servers
+{cyan('sandbox')} status | provision   ·   {cyan('persona')} edit   ·   {cyan('debug')} prefix
+{cyan('config')} [key [value]]   ·   {cyan('allow')} [list] | add <domain> [methods] | rm <domain>
 """
 
 
@@ -1138,7 +1157,7 @@ def dispatch(cfg, line: str) -> bool:
     if cmd == "quit":
         return False
     elif cmd == "help":
-        print(HELP)
+        print(HELP_MORE if rest.strip() in ("more", "all", "full") else HELP)
     elif cmd == "session":
         cmd_session(cfg, rest)
     elif cmd == "go":
@@ -1183,8 +1202,8 @@ def main() -> None:
     cfg.save()  # materialize defaults + persona on first start
     hermes_home().mkdir(parents=True, exist_ok=True)
     print(BANNER)
-    project = cfg.get("current_project") or "-"
-    print(f"project: {cyan(project)} {dim('·')} backend: {cyan(cfg.get('backend'))}")
+    print(dim("type ") + cyan("go <what you want done>") + dim(" to start work · ")
+          + cyan("help") + dim(" for the essentials"))
 
     session = None
     ansi = None
