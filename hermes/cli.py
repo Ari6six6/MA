@@ -1,7 +1,12 @@
 """The Hermes REPL — short commands for a phone keyboard.
 
-  run <text>        talk to the agent (alias: r)
-  project ...       new/use/list (alias: p)
+  go <text>         one shot: no project ceremony, runs in the background,
+                     prints the final answer when it lands (alias: none —
+                     it's the one you actually type)
+  run <text>        talk to the agent in the foreground, narrated turn by
+                     turn, inside the current project (alias: r)
+  space / project    new/use/list — a space IS a project, same files on disk
+                     (alias: p)
   gpu ...           attach/serve/status/tunnel/up/down (alias: g)
   mission/notes/history/summaries/tools/config/persona/help/quit
 """
@@ -11,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -33,6 +39,20 @@ from hermes.ui import bold, cyan, dim, green, magenta, red, yellow
 
 BANNER = f"{bold(magenta('hermes'))} {dim('v' + __version__)} — type {cyan('help')}"
 
+# `go` mechanics: one default space so nobody has to think about project
+# ceremony, a background thread per space so the prompt is never blocked, and
+# a hard wall-clock gate per run so a background run can never run forever
+# unattended. The lock also guards `run`/`go` on the same space against each
+# other so two agent loops never race on the same run-numbering/transcript.
+DEFAULT_SPACE = "space"
+GO_MAX_RUN_SECONDS = 42 * 60
+_RUN_LOCKS: dict[str, threading.Lock] = {}
+_ACTIVE_GO: dict[str, int] = {}  # space name -> run_id currently in flight
+
+
+def _run_lock(name: str) -> threading.Lock:
+    return _RUN_LOCKS.setdefault(name, threading.Lock())
+
 
 # ---------------------------------------------------------------- helpers
 def _projects_dir(cfg) -> Path:
@@ -47,6 +67,26 @@ def _current_project(cfg) -> Project | None:
         return Project.load(_projects_dir(cfg), name)
     except ProjectError:
         return None
+
+
+def _ensure_space(cfg) -> Project:
+    """`go`'s no-ceremony entry point: use the current project/space if one is
+    selected, else silently create-and-select the default one. Same on-disk
+    project layout as always (`project`/`space new` still work if you want
+    more than one) — this just means `go` never blocks on "no current
+    project"."""
+    project = _current_project(cfg)
+    if project is not None:
+        return project
+    name = cfg.get("current_project") or DEFAULT_SPACE
+    pdir = _projects_dir(cfg)
+    try:
+        project = Project.load(pdir, name)
+    except ProjectError:
+        project = Project.create(pdir, name)
+    cfg.set("current_project", name, coerce=False)
+    cfg.save()
+    return project
 
 
 def _probe_vllm(cfg) -> bool:
@@ -157,14 +197,11 @@ def _pick_model(cfg):
 
 
 # ---------------------------------------------------------------- commands
-def cmd_run(cfg, args: str) -> None:
-    if not args.strip():
-        print(dim("usage: run <prompt>"))
-        return
-    project = _current_project(cfg)
-    if project is None:
-        print(yellow("no current project") + dim(" — `project new <name>` or `project use <name>`"))
-        return
+def _prepare_run(cfg):
+    """Common setup for `run`/`go`: makes sure the GPU tunnel + vLLM endpoint
+    are reachable and builds the env dict the package needs. Returns
+    (gpu, sandbox, env, backend), or None (having already printed why) if the
+    backend isn't reachable."""
     state = load_gpu_state()
     gpu = endpoint_from_state(state)
     sandbox = local_endpoint()  # the air-gapped exec container runs on this same box
@@ -174,7 +211,7 @@ def cmd_run(cfg, args: str) -> None:
         if not _probe_vllm(cfg):
             print(red("vLLM endpoint not reachable") + dim(f" — {_vllm_down_hint(gpu)} "
                   "(or `config set backend mock` for a dry run)."))
-            return
+            return None
     from hermes.models import resolve
     spec = resolve(cfg)
     env = {
@@ -185,10 +222,73 @@ def cmd_run(cfg, args: str) -> None:
         "model_identity": spec.identity,
         "model_tool_guidance": spec.tool_guidance,
     }
-    prompt = args.strip()
+    return gpu, sandbox, env, make_backend(cfg)
 
-    backend = make_backend(cfg)
-    agent.run(project, prompt, cfg, backend, gpu=gpu, env=env, sandbox=sandbox)
+
+def cmd_run(cfg, args: str) -> None:
+    if not args.strip():
+        print(dim("usage: run <prompt>"))
+        return
+    project = _current_project(cfg)
+    if project is None:
+        print(yellow("no current project")
+              + dim(" — `project new <name>` or `project use <name>` "
+                    "(or just `go`, which doesn't need one)"))
+        return
+    lock = _run_lock(project.name)
+    if lock.locked():
+        print(yellow(f"'{project.name}' is busy") + dim(
+            f" — a `go` is still working there (run {_ACTIVE_GO.get(project.name, '?')})."))
+        return
+    prepared = _prepare_run(cfg)
+    if prepared is None:
+        return
+    gpu, sandbox, env, backend = prepared
+    with lock:
+        agent.run(project, args.strip(), cfg, backend, gpu=gpu, env=env, sandbox=sandbox)
+
+
+def cmd_go(cfg, args: str) -> None:
+    """The one command: no project ceremony (auto-creates/uses the default
+    space), no watching (runs quietly in a background thread and prints the
+    final answer when it lands), hard-capped at GO_MAX_RUN_SECONDS so an
+    unattended run can never run forever. The REPL stays free the whole time —
+    keep typing, it'll interleave its result whenever it's ready."""
+    prompt = args.strip()
+    if not prompt:
+        print(dim("usage: go <prompt>"))
+        return
+    project = _ensure_space(cfg)
+    lock = _run_lock(project.name)
+    if lock.locked():
+        print(yellow(f"still working in '{project.name}'") + dim(
+            f" (run {_ACTIVE_GO.get(project.name, '?')}) — let it land, "
+            f"or wait up to {GO_MAX_RUN_SECONDS // 60} min, before another `go`."))
+        return
+    prepared = _prepare_run(cfg)
+    if prepared is None:
+        return
+    gpu, sandbox, env, backend = prepared
+    run_id = project.next_run_id()
+
+    def _worker() -> None:
+        with lock:
+            result = agent.run(
+                project, prompt, cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
+                confirm_fn=lambda action, detail="", viewable=None: True,  # unattended: nothing to stall on
+                quiet=True, max_run_seconds=GO_MAX_RUN_SECONDS,
+            )
+        _ACTIVE_GO.pop(project.name, None)
+        status = red("aborted") if result.aborted else green("done")
+        print(f"\n{bold(cyan(f'[{project.name}]'))} {status} "
+              f"{dim(f'· run {result.run_id:04d} · {result.turns} turn(s)')}")
+        print((result.final_text or result.summary).strip())
+
+    _ACTIVE_GO[project.name] = run_id
+    threading.Thread(target=_worker, daemon=True, name=f"go-{project.name}-{run_id}").start()
+    print(dim(f"→ working in '{project.name}' (run {run_id:04d}, "
+               f"hard cap {GO_MAX_RUN_SECONDS // 60} min) — keep going, "
+               "the answer lands here when it's done."))
 
 
 def cmd_project(cfg, args: str) -> None:
@@ -807,8 +907,14 @@ def cmd_tools(cfg) -> None:
 
 
 HELP = f"""\
-{cyan('run')} <text>            start an agent run {dim('(alias: r)')}
-{cyan('project')} new|use|list  manage projects {dim('(alias: p)')}
+{cyan('go')} <text>             {bold('the one command')} — no project ceremony, no
+                     watching: runs in the background against the current
+                     space (auto-created if you have none), hard-capped at
+                     {GO_MAX_RUN_SECONDS // 60} min, prints the final answer here when it lands
+{cyan('run')} <text>            the old foreground way — narrated turn by turn,
+                     requires a selected project {dim('(alias: r)')}
+{cyan('space')} / {cyan('project')} new|use|list  a space IS a project — same files on
+                     disk, `go` just never makes you pick one {dim('(alias: p)')}
 {cyan('mission')} [edit]        show/edit the project mission
 {cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
 {cyan('directives')} [edit|reconcile]  standing instructions distilled from history
@@ -838,9 +944,11 @@ def dispatch(cfg, line: str) -> bool:
         return False
     elif cmd == "help":
         print(HELP)
+    elif cmd == "go":
+        cmd_go(cfg, rest)
     elif cmd == "run":
         cmd_run(cfg, rest)
-    elif cmd == "project":
+    elif cmd in ("project", "space"):
         cmd_project(cfg, rest)
     elif cmd == "gpu":
         cmd_gpu(cfg, rest)
@@ -883,27 +991,41 @@ def main() -> None:
 
     session = None
     ansi = None
+    patch_stdout = None
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.formatted_text import ANSI as ansi
         from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.patch_stdout import patch_stdout
         session = PromptSession(history=FileHistory(str(hermes_home() / "repl_history")))
     except Exception:
         pass
 
-    while True:
-        proj = cfg.get("current_project") or "-"
-        prompt_text = f"{magenta('hermes')}({cyan(proj)})> "
-        try:
-            line = session.prompt(ansi(prompt_text)) if session else input(prompt_text)
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        try:
-            if not dispatch(cfg, line):
+    def _loop() -> None:
+        while True:
+            proj = cfg.get("current_project") or "-"
+            prompt_text = f"{magenta('hermes')}({cyan(proj)})> "
+            try:
+                line = session.prompt(ansi(prompt_text)) if session else input(prompt_text)
+            except (EOFError, KeyboardInterrupt):
+                print()
                 break
-        except Exception as e:  # the REPL must survive anything
-            print(red(f"error: {type(e).__name__}: {e}"))
+            try:
+                if not dispatch(cfg, line):
+                    break
+            except Exception as e:  # the REPL must survive anything
+                print(red(f"error: {type(e).__name__}: {e}"))
+
+    # `go` finishes on a background thread and prints its result whenever it
+    # lands — patch_stdout is prompt_toolkit's documented way to let that kind
+    # of background output interleave cleanly above a live prompt line instead
+    # of mangling it. Only relevant when the prompt_toolkit session is in play;
+    # the plain-input() fallback has no live line to protect.
+    if patch_stdout is not None:
+        with patch_stdout():
+            _loop()
+    else:
+        _loop()
     print(dim("bye."))
 
 

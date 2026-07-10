@@ -151,10 +151,17 @@ def _normalize(text: str) -> str:
 
 
 def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
-        sandbox=None):
+        sandbox=None, quiet=False, max_run_seconds=None):
     """Execute one agent run. `env` carries gpu_status / remote_workspace /
     context_window for the package; `gpu` is an SSHEndpoint or None; `sandbox` is
-    the VPS sandbox-host SSHEndpoint (the air-gapped exec container) or None."""
+    the VPS sandbox-host SSHEndpoint (the air-gapped exec container) or None.
+    `quiet` suppresses all turn-by-turn narration (model text, tool calls, tool
+    output, nudges) — the run still writes its transcript/summary/final.md as
+    normal, it just doesn't print anything until the caller reads RunResult.
+    Errors and interrupts still print regardless, since those aren't narration.
+    `max_run_seconds`, when given, overrides cfg's wall-clock budget for this
+    one call without touching the persisted config."""
+    out = (lambda *a, **k: None) if quiet else print
     if confirm_fn is None:
         from hermes.confirm import confirm as confirm_fn
     # Unattended mode: with no operator watching, a y/n gate is a place the run
@@ -165,7 +172,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     # approval is still printed so the transcript shows what it did.
     if cfg.get("auto_confirm", False):
         def confirm_fn(action, detail="", viewable=None):  # noqa: F811
-            print(dim(f"  [auto-approved] {action}"))
+            out(dim(f"  [auto-approved] {action}"))
             return True
 
     env = env or {}
@@ -213,7 +220,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     if cfg.get("directives_enabled", False):
         from hermes import directives as directives_mod
         if directives_mod.maybe_reconcile(project, backend, cfg, run_id, think_re):
-            print(magenta("  (reconciled standing instructions → directives.md)"))
+            out(magenta("  (reconciled standing instructions → directives.md)"))
             log({"role": "directives", "content": project.read_directives()})
 
     messages = package.assemble(project, prompt, env, cfg)
@@ -242,7 +249,9 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     # by default (0). Composes with max_turns rather than replacing it — raising
     # or removing the turn cap for an unattended/autopilot run still leaves this
     # as the backstop that actually bounds wall-clock time.
-    max_run_seconds = cfg.get("max_run_seconds", 0)
+    max_run_seconds = (
+        cfg.get("max_run_seconds", 0) if max_run_seconds is None else max_run_seconds
+    )
     run_started = time.monotonic()
     time_wrapup_sent = False
     nudges_left = cfg.get("stall_nudges", 2)
@@ -287,7 +296,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         for turns in range(1, max_turns + 1):
             elapsed = time.monotonic() - run_started
             if max_run_seconds and elapsed >= max_run_seconds:
-                print(yellow(f"  (wall-clock budget {max_run_seconds}s reached)"))
+                out(yellow(f"  (wall-clock budget {max_run_seconds}s reached)"))
                 aborted = True
                 break
             if (max_run_seconds and not time_wrapup_sent
@@ -296,12 +305,12 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                 warn = package.time_wrapup_warning()
                 messages.append({"role": "user", "content": warn})
                 log({"role": "user", "content": warn})
-                print(yellow("  (85% of the time budget used — telling the model to wrap up)"))
+                out(yellow("  (85% of the time budget used — telling the model to wrap up)"))
             if compaction.maybe_compact(
                 messages, stable_prefix, backend, cfg, context_window,
                 schema_chars, think_re=think_re, log=log,
             ):
-                print(magenta("  (compacted the live conversation to free context)"))
+                out(magenta("  (compacted the live conversation to free context)"))
             result: ChatResult = backend.chat(messages, tools=registry.schemas())
             shown = strip_think(result.content, think_re)
             if inner_voice:
@@ -319,7 +328,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
             )
             repeated = bool(shown) and _normalize(shown) == _normalize(prev_shown)
             if shown:
-                print(shown)
+                out(shown)
                 final_text = shown
                 prev_shown = shown
 
@@ -335,9 +344,9 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                 messages.append({"role": "assistant", "content": result.content or ""})
                 messages.append({"role": "user", "content": nudge})
                 log({"role": "user", "content": nudge})
-                print(yellow("  (model repeated itself without acting — nudging)")
-                      if repeated else
-                      dim("  (no tool call — nudging the model to act or finish_run)"))
+                out(yellow("  (model repeated itself without acting — nudging)")
+                    if repeated else
+                    dim("  (no tool call — nudging the model to act or finish_run)"))
                 continue
 
             messages.append(_assistant_msg(result))
@@ -349,11 +358,11 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
             turn_produced_taint = False
             if turn_tainted:
                 tainted_turns += 1
-                print(magenta("  (tainted context: untrusted content in scope — "
-                              "actions this turn need your approval)"))
+                out(magenta("  (tainted context: untrusted content in scope — "
+                            "actions this turn need your approval)"))
             for tc in result.tool_calls:
                 if tc.name != "finish_run":
-                    print(dim("  → ") + cyan(tc.name) + dim(f"({_brief(tc.arguments)})"))
+                    out(dim("  → ") + cyan(tc.name) + dim(f"({_brief(tc.arguments)})"))
                 # Checkpoint (feature 6): before the first file-mutating call of a
                 # turn, snapshot the project so this turn's changes are revertible.
                 if (cfg.get("checkpointing", True) and not checkpointed_this_turn
@@ -366,7 +375,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                         )
                         log({"role": "checkpoint", "content": cid})
                     except OSError as e:
-                        print(yellow(f"  (checkpoint skipped: {e})"))
+                        out(yellow(f"  (checkpoint skipped: {e})"))
                 tool_names_used.append(tc.name)
                 output = _dispatch_maybe_tainted(
                     registry, tc, ctx, confirm_fn, turn_tainted
@@ -375,7 +384,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     turn_produced_taint = True
                 log({"role": "tool", "name": tc.name, "content": output})
                 if tc.name != "finish_run":
-                    _echo_result(output)
+                    _echo_result(output, out=out)
                 messages.append(
                     {"role": "tool", "tool_call_id": tc.id, "content": output}
                 )
@@ -405,8 +414,8 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     nudge = package.phantom_nudge()
                     messages.append({"role": "user", "content": nudge})
                     log({"role": "user", "content": nudge})
-                    print(yellow("  (code in the answer but nothing written or "
-                                 "run — bouncing back to actually do it)"))
+                    out(yellow("  (code in the answer but nothing written or "
+                               "run — bouncing back to actually do it)"))
                     continue
                 if (
                     verify_before_done_left > 0
@@ -421,8 +430,8 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     nudge = package.verify_before_done_nudge()
                     messages.append({"role": "user", "content": nudge})
                     log({"role": "user", "content": nudge})
-                    print(yellow("  (files changed but nothing was run — "
-                                 "verify before concluding)"))
+                    out(yellow("  (files changed but nothing was run — "
+                               "verify before concluding)"))
                     continue
                 if verify_rounds_left > 0 and (
                     set(tool_names_used) & CODE_WRITE_TOOLS
@@ -431,7 +440,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     # skeptical pass re-runs the code in the real sandbox and
                     # returns a verdict the doer can't fake.
                     verify_rounds_left -= 1
-                    print(magenta(
+                    out(magenta(
                         "  (independent verification — re-running the code in the sandbox)"))
                     # The verifier grades in the air-gapped sandbox only — strip
                     # every GPU-reaching tool so it can't run (or "confirm") the
@@ -439,7 +448,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     verify_registry = registry.without(GPU_TOOLS)
                     passed, report = _verify(
                         backend, verify_registry, ctx, prompt, files_touched, log,
-                        cfg.get("verify_max_turns", 6), think_re=think_re,
+                        cfg.get("verify_max_turns", 6), think_re=think_re, out=out,
                     )
                     if not passed:
                         verify_failures += 1
@@ -447,22 +456,22 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                         nudge = package.verify_failed(report)
                         messages.append({"role": "user", "content": nudge})
                         log({"role": "user", "content": nudge})
-                        print(red("  (verification FAILED — sending it back to fix "
-                                  "the real problem)"))
+                        out(red("  (verification FAILED — sending it back to fix "
+                                "the real problem)"))
                         continue
-                    print(green("  (verification PASSED — the code actually runs)"))
+                    out(green("  (verification PASSED — the code actually runs)"))
                 break
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
-                print(yellow("  (circuit breaker: too many consecutive tool errors)"))
+                out(yellow("  (circuit breaker: too many consecutive tool errors)"))
                 aborted = True
                 break
             if turns == max_turns - 2:
                 warn = package.wrapup_warning()
                 messages.append({"role": "user", "content": warn})
                 log({"role": "user", "content": warn})
-                print(yellow("  (2 turns left — telling the model to wrap up)"))
+                out(yellow("  (2 turns left — telling the model to wrap up)"))
         else:
-            print(yellow(f"  (turn cap {max_turns} reached)"))
+            out(yellow(f"  (turn cap {max_turns} reached)"))
             aborted = True
     except LLMTransportError as e:
         print(red(f"\n{e}"))
@@ -497,7 +506,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         if figured_out:
             _skills_nudge(
                 backend, messages, registry, ctx, log,
-                cfg.get("skills_nudge_max_turns", 3), think_re,
+                cfg.get("skills_nudge_max_turns", 3), think_re, narrate=out,
             )
 
     (run_dir / "summary.md").write_text(summary + "\n")
@@ -523,7 +532,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     }
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     status = red("aborted") if aborted else green("complete")
-    print(f"\n{dim(f'[run {run_id:04d}')} {status} {dim(f'— {turns} turn(s)]')}")
+    out(f"\n{dim(f'[run {run_id:04d}')} {status} {dim(f'— {turns} turn(s)]')}")
 
     # Retrospection (feature 9): every N runs, a fresh-context pass reviews the
     # recorded metrics + summaries of recent runs (including this one, just
@@ -534,7 +543,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         if retrospect_mod.maybe_retrospect(
             project, backend, cfg, run_id, think_re=think_re, log=log,
         ):
-            print(magenta("  (retrospection — banked lessons from recent runs)"))
+            out(magenta("  (retrospection — banked lessons from recent runs)"))
     return RunResult(run_id, summary, final_text, turns, aborted)
 
 
@@ -633,10 +642,12 @@ def _dispatch_maybe_tainted(registry, tc, ctx, confirm_fn, turn_tainted: bool) -
         ctx.confirm = saved
 
 
-def _skills_nudge(backend, messages, registry, ctx, log, max_turns, think_re) -> None:
+def _skills_nudge(backend, messages, registry, ctx, log, max_turns, think_re,
+                  narrate=print) -> None:
     """A bounded post-task pass inviting the agent to write/update a skill. It
     reuses the run's context and tools but never touches the run's summary:
-    finish_run is intercepted, not dispatched, so ctx.finish_summary is safe."""
+    finish_run is intercepted, not dispatched, so ctx.finish_summary is safe.
+    `narrate` defaults to print; pass a no-op to silence it (a quiet agent.run)."""
     msgs = messages + [{"role": "user", "content": package.skills_nudge()}]
     log({"role": "user", "content": package.skills_nudge()})
     for _ in range(max(1, int(max_turns))):
@@ -649,7 +660,7 @@ def _skills_nudge(backend, messages, registry, ctx, log, max_turns, think_re) ->
              "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
                             for tc in result.tool_calls]})
         if shown:
-            print(magenta("  [skills] ") + dim(_brief(shown.splitlines()[0], 120)))
+            narrate(magenta("  [skills] ") + dim(_brief(shown.splitlines()[0], 120)))
         if not result.tool_calls:
             return
         msgs.append(_assistant_msg(result))
@@ -659,7 +670,7 @@ def _skills_nudge(backend, messages, registry, ctx, log, max_turns, think_re) ->
             else:
                 out = registry.dispatch(tc.name, tc.arguments, ctx)
                 if tc.name == "write_skill" and not out.startswith(("ERROR", "DENIED")):
-                    print(green("  (skill captured)"))
+                    narrate(green("  (skill captured)"))
             log({"role": "skills-tool", "name": tc.name, "content": out})
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})
 
@@ -703,12 +714,14 @@ def _arg(arguments: str, key: str):
 
 
 def _critic_pass(backend, registry, ctx, system, user, label, log, max_turns,
-                 require_evidence, no_evidence_msg, think_re=THINK_RE) -> tuple[bool, str]:
+                 require_evidence, no_evidence_msg, think_re=THINK_RE,
+                 narrate=print) -> tuple[bool, str]:
     """One independent reviewing pass: fresh context, a skeptical prompt, the
     same real sandbox. Re-runs the code itself and returns (passed, report).
     Fails closed — no clear PASS verdict means FAIL. When `require_evidence` is
     set, a PASS is rejected unless the pass actually ran/queried something real
-    (`VERIFY_EVIDENCE_TOOLS`), because author and critic share the same weights."""
+    (`VERIFY_EVIDENCE_TOOLS`), because author and critic share the same weights.
+    `narrate` defaults to print; pass a no-op to silence it (a quiet agent.run)."""
     msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     report = ""
     executed = False  # did the critic run/query anything that returned real output?
@@ -726,7 +739,7 @@ def _critic_pass(backend, registry, ctx, system, user, label, log, max_turns,
         })
         if shown:
             report = shown
-            print(magenta(f"  [{label}] ") + dim(_brief(shown.splitlines()[0], 120)))
+            narrate(magenta(f"  [{label}] ") + dim(_brief(shown.splitlines()[0], 120)))
         verdicts = VERDICT_RE.findall(shown) if shown else []
         if verdicts:
             passed = verdicts[-1].upper() == "PASS"
@@ -746,23 +759,24 @@ def _critic_pass(backend, registry, ctx, system, user, label, log, max_turns,
                     ("ERROR", "DENIED")
                 ):
                     executed = True
-                print(dim(f"    [{label}] → ") + cyan(tc.name))
-                _echo_result(out)
+                narrate(dim(f"    [{label}] → ") + cyan(tc.name))
+                _echo_result(out, out=narrate)
             log({"role": f"{label}-tool", "name": tc.name, "content": out})
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})
     return False, report or f"(the {label} produced no verdict)"
 
 
 def _verify(backend, registry, ctx, request, files, log, max_turns,
-            think_re=THINK_RE) -> tuple[bool, str]:
+            think_re=THINK_RE, out=print) -> tuple[bool, str]:
     """The doer doesn't grade its own homework — a fresh, skeptical pass
-    re-runs the code itself (the plain verifier: re-run the code, text PASS ok)."""
+    re-runs the code itself (the plain verifier: re-run the code, text PASS ok).
+    `out` defaults to print; pass a no-op to silence it (a quiet agent.run)."""
     return _critic_pass(
         backend, registry, ctx,
         package.verifier_prompt(),
         package.verifier_request(request, files),
         "verifier", log, max_turns, require_evidence=False,
-        no_evidence_msg="", think_re=think_re,
+        no_evidence_msg="", think_re=think_re, narrate=out,
     )
 
 
@@ -771,11 +785,12 @@ def _brief(arguments: str, cap: int = 100) -> str:
     return text[:cap] + ("…" if len(text) > cap else "")
 
 
-def _echo_result(output: str, max_lines: int = 8, cap: int = 600) -> None:
+def _echo_result(output: str, max_lines: int = 8, cap: int = 600, out=print) -> None:
     """Show the operator the real tool result — exit codes, output, errors —
     not just the model's later prose about it. Fabricated "it passed" claims
     can't survive next to the actual output on the screen. Kept short for a
-    phone: a head of lines, capped, dim (red when the tool reported trouble)."""
+    phone: a head of lines, capped, dim (red when the tool reported trouble).
+    `out` defaults to print; pass a no-op to silence it (a quiet agent.run)."""
     text = (output or "").strip()
     if not text:
         return
@@ -787,7 +802,7 @@ def _echo_result(output: str, max_lines: int = 8, cap: int = 600) -> None:
         lines = shown.splitlines()
     color = red if text.startswith(("ERROR", "DENIED")) else dim
     for line in lines:
-        print(color("    " + line))
+        out(color("    " + line))
     extra = len(all_lines) - len(lines)
     if extra > 0:
-        print(dim(f"    … (+{extra} more line(s))"))
+        out(dim(f"    … (+{extra} more line(s))"))
