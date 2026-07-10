@@ -295,10 +295,14 @@ def stall_nudge(repeated: bool = False) -> str:
 
 
 def operator_message(text: str) -> str:
-    """Wraps a message the operator sent live, mid-run (`go say`), so the
-    model reads it as new direction rather than part of the original prompt."""
+    """Wraps a message the operator sent live, mid-run (`go`/`go say`), so the
+    model reads it as new direction rather than part of the original prompt —
+    and treats it as a real exchange, not silent redirection. The operator is
+    watching this land live and wants to see a reply, not just a changed plan."""
     return (
-        "[operator message — sent live while you were mid-run; read and act "
-        "on it now, it isn't part of the original prompt:]\n\n"
-        f"{text.strip()}"
+        "[operator message — sent live while you were mid-run, read this now:]\n\n"
+        f"{text.strip()}\n\n"
+        "[Reply to your operator directly first — a short, plain-text "
+        "acknowledgment, no tool call yet — then carry on with the task, "
+        "folding this in. They're here with you, not just issuing orders.]"
     )
