@@ -1,8 +1,12 @@
 """The Hermes REPL — short commands for a phone keyboard.
 
-  go <text>         one shot: no project ceremony, runs in the background,
-                     prints the final answer when it lands (alias: none —
-                     it's the one you actually type)
+  go <text>         no project ceremony: runs in a detached background
+                     process (survives closing the phone), hard-capped at
+                     GO_MAX_RUN_SECONDS
+  go attach [space] watch a running `go` live — narration + inner voice —
+                     detach any time with Ctrl-C, it keeps running
+  go say [space] <text>   send it a message while it's running
+  go status         list what's running
   run <text>        talk to the agent in the foreground, narrated turn by
                      turn, inside the current project (alias: r)
   space / project    new/use/list — a space IS a project, same files on disk
@@ -16,15 +20,16 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import threading
+import sys
 import time
 from pathlib import Path
 
 import httpx
 
-from hermes import __version__, agent
+from hermes import __version__, agent, go_state
 from hermes import hosts as hosts_mod
 from hermes.config import Config, hermes_home, persona_path
+from hermes.go_state import DEFAULT_SPACE, GO_MAX_RUN_SECONDS
 from hermes.gpu import (
     endpoint_from_state,
     load_gpu_state,
@@ -38,20 +43,6 @@ from hermes.ssh import SSHEndpoint, SSHError, kill_pid, parse_ssh_string, pid_al
 from hermes.ui import bold, cyan, dim, green, magenta, red, yellow
 
 BANNER = f"{bold(magenta('hermes'))} {dim('v' + __version__)} — type {cyan('help')}"
-
-# `go` mechanics: one default space so nobody has to think about project
-# ceremony, a background thread per space so the prompt is never blocked, and
-# a hard wall-clock gate per run so a background run can never run forever
-# unattended. The lock also guards `run`/`go` on the same space against each
-# other so two agent loops never race on the same run-numbering/transcript.
-DEFAULT_SPACE = "space"
-GO_MAX_RUN_SECONDS = 42 * 60
-_RUN_LOCKS: dict[str, threading.Lock] = {}
-_ACTIVE_GO: dict[str, int] = {}  # space name -> run_id currently in flight
-
-
-def _run_lock(name: str) -> threading.Lock:
-    return _RUN_LOCKS.setdefault(name, threading.Lock())
 
 
 # ---------------------------------------------------------------- helpers
@@ -235,60 +226,148 @@ def cmd_run(cfg, args: str) -> None:
               + dim(" — `project new <name>` or `project use <name>` "
                     "(or just `go`, which doesn't need one)"))
         return
-    lock = _run_lock(project.name)
-    if lock.locked():
+    busy = go_state.active_entry(project.name)
+    if busy:
         print(yellow(f"'{project.name}' is busy") + dim(
-            f" — a `go` is still working there (run {_ACTIVE_GO.get(project.name, '?')})."))
+            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
         return
     prepared = _prepare_run(cfg)
     if prepared is None:
         return
     gpu, sandbox, env, backend = prepared
-    with lock:
-        agent.run(project, args.strip(), cfg, backend, gpu=gpu, env=env, sandbox=sandbox)
+    go_state.start_entry(project.name, os.getpid(), kind="run")
+    try:
+        agent.run(project, args.strip(), cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
+                  on_run_started=lambda run_id, _run_dir: go_state.update_run_id(project.name, run_id))
+    finally:
+        go_state.clear_entry(project.name)
 
 
 def cmd_go(cfg, args: str) -> None:
     """The one command: no project ceremony (auto-creates/uses the default
-    space), no watching (runs quietly in a background thread and prints the
-    final answer when it lands), hard-capped at GO_MAX_RUN_SECONDS so an
-    unattended run can never run forever. The REPL stays free the whole time —
-    keep typing, it'll interleave its result whenever it's ready."""
+    space), runs in a detached background process — survives closing the
+    phone — hard-capped at GO_MAX_RUN_SECONDS. `go attach` watches it live,
+    `go say` talks to it while it's running, `go status` checks on it."""
+    parts = args.split(maxsplit=1)
+    sub, rest = (parts[0], parts[1] if len(parts) > 1 else "") if parts else ("", "")
+    if sub == "attach":
+        cmd_go_attach(cfg, rest)
+        return
+    if sub == "say":
+        cmd_go_say(cfg, rest)
+        return
+    if sub == "status":
+        cmd_go_status(cfg, rest)
+        return
+
     prompt = args.strip()
     if not prompt:
-        print(dim("usage: go <prompt>"))
+        print(dim("usage: go <prompt>  |  go attach [space]  |  "
+                   "go say [space] <text>  |  go status"))
         return
     project = _ensure_space(cfg)
-    lock = _run_lock(project.name)
-    if lock.locked():
-        print(yellow(f"still working in '{project.name}'") + dim(
-            f" (run {_ACTIVE_GO.get(project.name, '?')}) — let it land, "
-            f"or wait up to {GO_MAX_RUN_SECONDS // 60} min, before another `go`."))
+    busy = go_state.active_entry(project.name)
+    if busy:
+        print(yellow(f"'{project.name}' is busy") + dim(
+            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
         return
-    prepared = _prepare_run(cfg)
+    prepared = _prepare_run(cfg)  # fast fail here; the worker rebuilds its own gpu/sandbox/env/backend
     if prepared is None:
         return
-    gpu, sandbox, env, backend = prepared
-    run_id = project.next_run_id()
 
-    def _worker() -> None:
-        with lock:
-            result = agent.run(
-                project, prompt, cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
-                confirm_fn=lambda action, detail="", viewable=None: True,  # unattended: nothing to stall on
-                quiet=True, max_run_seconds=GO_MAX_RUN_SECONDS,
+    prompt_file = go_state.prompt_tmp_path(project.name)
+    prompt_file.write_text(prompt)
+    log_p = go_state.log_path(project.name)
+    inbox_p = go_state.inbox_path(project.name)
+    inbox_p.unlink(missing_ok=True)  # discard stale unread messages from a previous run in this space
+
+    with open(log_p, "w") as log_f:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", "-m", "hermes.go_worker", project.name, str(prompt_file)],
+                stdout=log_f, stderr=subprocess.STDOUT, start_new_session=True,
             )
-        _ACTIVE_GO.pop(project.name, None)
-        status = red("aborted") if result.aborted else green("done")
-        print(f"\n{bold(cyan(f'[{project.name}]'))} {status} "
-              f"{dim(f'· run {result.run_id:04d} · {result.turns} turn(s)')}")
-        print((result.final_text or result.summary).strip())
+        except OSError as e:
+            print(red(f"could not start background run: {e}"))
+            prompt_file.unlink(missing_ok=True)
+            return
 
-    _ACTIVE_GO[project.name] = run_id
-    threading.Thread(target=_worker, daemon=True, name=f"go-{project.name}-{run_id}").start()
-    print(dim(f"→ working in '{project.name}' (run {run_id:04d}, "
-               f"hard cap {GO_MAX_RUN_SECONDS // 60} min) — keep going, "
-               "the answer lands here when it's done."))
+    go_state.start_entry(project.name, proc.pid, kind="go", log=str(log_p), inbox=str(inbox_p))
+    print(dim(f"→ working in '{project.name}' in the background (pid {proc.pid}, "
+               f"hard cap {GO_MAX_RUN_SECONDS // 60} min) — "
+               "`go attach` to watch live, `go say <text>` to send a message, "
+               "`go status` to check."))
+
+
+def _go_target_space(cfg, name: str) -> str:
+    return name.strip() or cfg.get("current_project") or DEFAULT_SPACE
+
+
+def cmd_go_attach(cfg, args: str) -> None:
+    space = _go_target_space(cfg, args)
+    entry = go_state.active_entry(space)
+    if entry is None:
+        print(yellow(f"nothing running in '{space}'"))
+        return
+    if not entry.get("log_path"):
+        print(yellow(f"'{space}' is running in the foreground elsewhere") + dim(" — nothing to attach to."))
+        return
+    log_p = Path(entry["log_path"])
+    print(dim(f"— attached to '{space}' (pid {entry['pid']}) — Ctrl-C to detach, it keeps running —"))
+    pos = 0
+    try:
+        while True:
+            entry = go_state.active_entry(space)
+            if log_p.exists():
+                with log_p.open("r") as f:
+                    f.seek(pos)
+                    chunk = f.read()
+                    pos = f.tell()
+                if chunk:
+                    print(chunk, end="")
+            if entry is None:
+                print(dim(f"\n(run in '{space}' has finished)"))
+                return
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print(dim(f"\n(detached — '{space}' keeps running in the background)"))
+
+
+def cmd_go_say(cfg, args: str) -> None:
+    active = go_state.list_active()
+    parts = args.split(maxsplit=1)
+    if parts and parts[0] in active and len(parts) > 1:
+        space, text = parts[0], parts[1]
+    else:
+        space, text = _go_target_space(cfg, ""), args.strip()
+    if not text.strip():
+        print(dim("usage: go say [space] <text>"))
+        return
+    entry = active.get(space)
+    if entry is None:
+        print(yellow(f"nothing running in '{space}'") + dim(" — nothing to say to."))
+        return
+    if not entry.get("inbox_path"):
+        print(yellow(f"'{space}' is running in the foreground elsewhere") + dim(" — no inbox to send to."))
+        return
+    line = json.dumps({"ts": time.strftime("%Y-%m-%d %H:%M"), "text": text.strip()})
+    with open(entry["inbox_path"], "a") as f:
+        f.write(line + "\n")
+    print(green(f"sent to '{space}'") + dim(" — it'll pick this up at the next turn boundary."))
+
+
+def cmd_go_status(cfg, args: str) -> None:
+    active = go_state.list_active()
+    if not active:
+        print(dim("(nothing running)"))
+        return
+    for space, entry in sorted(active.items()):
+        elapsed = int(time.time() - entry.get("started_epoch", time.time()))
+        run_id = entry.get("run_id")
+        run_label = f"run {run_id:04d}" if run_id else "run ?"
+        pid_label = f"pid {entry['pid']}"
+        print(f"  {cyan(space)}  {dim(entry.get('kind', 'go'))}  {run_label}  "
+              f"{elapsed // 60}m{elapsed % 60:02d}s  {dim(pid_label)}")
 
 
 def cmd_project(cfg, args: str) -> None:
@@ -907,10 +986,14 @@ def cmd_tools(cfg) -> None:
 
 
 HELP = f"""\
-{cyan('go')} <text>             {bold('the one command')} — no project ceremony, no
-                     watching: runs in the background against the current
-                     space (auto-created if you have none), hard-capped at
-                     {GO_MAX_RUN_SECONDS // 60} min, prints the final answer here when it lands
+{cyan('go')} <text>             {bold('the one command')} — no project ceremony: runs
+                     in a detached background process against the current
+                     space (auto-created if you have none), survives closing
+                     the phone, hard-capped at {GO_MAX_RUN_SECONDS // 60} min
+{cyan('go')} attach [space]      watch a running `go` live (narration + inner
+                     voice) — Ctrl-C detaches, it keeps running
+{cyan('go')} say [space] <text>  send it a message while it's running
+{cyan('go')} status              list what's running
 {cyan('run')} <text>            the old foreground way — narrated turn by turn,
                      requires a selected project {dim('(alias: r)')}
 {cyan('space')} / {cyan('project')} new|use|list  a space IS a project — same files on

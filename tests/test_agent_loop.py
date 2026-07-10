@@ -4,7 +4,8 @@ from hermes import agent
 from hermes.llm import MockBackend
 
 
-def run_agent(project, cfg, script, confirm=None, gpu=None, sandbox=None):
+def run_agent(project, cfg, script, confirm=None, gpu=None, sandbox=None,
+              inbox_path=None, on_run_started=None, show_thinking=False):
     backend = MockBackend(script)
     return agent.run(
         project,
@@ -15,6 +16,9 @@ def run_agent(project, cfg, script, confirm=None, gpu=None, sandbox=None):
         sandbox=sandbox,
         env={},
         confirm_fn=confirm or (lambda *a, **k: True),
+        inbox_path=inbox_path,
+        on_run_started=on_run_started,
+        show_thinking=show_thinking,
     )
 
 
@@ -444,3 +448,68 @@ def test_inner_voice_can_be_disabled(project, cfg):
         ],
     )
     assert not (project.runs_dir / "0001" / "thinking.jsonl").exists()
+
+
+def test_on_run_started_callback_fires_with_run_id_and_dir(project, cfg):
+    captured = []
+    run_agent(
+        project, cfg,
+        [{"tool": "finish_run", "args": {"summary": "done"}}],
+        on_run_started=lambda run_id, run_dir: captured.append((run_id, run_dir)),
+    )
+    assert captured == [(1, project.runs_dir / "0001")]
+
+
+def test_on_run_started_callback_failure_does_not_break_the_run(project, cfg):
+    def bad_callback(run_id, run_dir):
+        raise RuntimeError("boom")
+
+    result = run_agent(
+        project, cfg,
+        [{"tool": "finish_run", "args": {"summary": "done"}}],
+        on_run_started=bad_callback,
+    )
+    assert result.summary == "done"
+
+
+def test_inbox_message_gets_woven_into_conversation(project, cfg, tmp_path):
+    # One echoed turn is enough to land on a final answer, so the operator's
+    # text is guaranteed to still be near the tail MockBackend echoes back.
+    cfg.set("stall_nudges", 0)
+    inbox = tmp_path / "inbox.jsonl"
+    inbox.write_text(json.dumps({"text": "actually also check the logs"}) + "\n")
+
+    result = run_agent(project, cfg, [], inbox_path=inbox)
+
+    assert "actually also check the logs" in result.final_text
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert '"role": "operator"' in transcript
+    assert "actually also check the logs" in transcript
+
+
+def test_inbox_none_is_a_no_op(project, cfg):
+    # inbox_path defaults to None (every existing caller) — must not error.
+    result = run_agent(project, cfg, [{"tool": "finish_run", "args": {"summary": "done"}}])
+    assert result.summary == "done"
+
+
+def test_show_thinking_prints_inner_voice_when_enabled(project, cfg, capsys):
+    run_agent(
+        project, cfg,
+        [{"tool": "finish_run", "args": {"summary": "done"},
+          "say": "<think>reasoning here</think>ok"}],
+        show_thinking=True,
+    )
+    out = capsys.readouterr().out
+    assert "[inner voice]" in out
+    assert "reasoning here" in out
+
+
+def test_show_thinking_off_by_default(project, cfg, capsys):
+    run_agent(
+        project, cfg,
+        [{"tool": "finish_run", "args": {"summary": "done"},
+          "say": "<think>reasoning here</think>ok"}],
+    )
+    out = capsys.readouterr().out
+    assert "[inner voice]" not in out

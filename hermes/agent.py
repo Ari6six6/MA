@@ -4,9 +4,11 @@ loop -> a final answer + a summary the next run will inherit."""
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlparse
 
 from hermes import checkpoint
@@ -150,8 +152,39 @@ def _normalize(text: str) -> str:
     return " ".join(text.split()).lower()
 
 
+def _drain_inbox(inbox_path) -> list[str]:
+    """Pop every pending message a separate `hermes go say` process wrote,
+    atomically. Renaming the file aside before reading (instead of
+    read-then-truncate) means a `go say` racing this drain either lands in the
+    detached old file — read right here — or recreates the path fresh, picked
+    up next turn boundary: never silently lost, only possibly delayed a turn."""
+    inbox_path = Path(inbox_path)
+    if not inbox_path.exists():
+        return []
+    tmp = inbox_path.with_name(inbox_path.name + f".draining.{os.getpid()}")
+    try:
+        inbox_path.rename(tmp)
+    except OSError:
+        return []
+    try:
+        text = tmp.read_text()
+    finally:
+        tmp.unlink(missing_ok=True)
+    out: list[str] = []
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg = entry.get("text")
+        if isinstance(msg, str) and msg.strip():
+            out.append(msg.strip())
+    return out
+
+
 def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
-        sandbox=None, quiet=False, max_run_seconds=None):
+        sandbox=None, quiet=False, max_run_seconds=None, inbox_path=None,
+        on_run_started=None, show_thinking=False):
     """Execute one agent run. `env` carries gpu_status / remote_workspace /
     context_window for the package; `gpu` is an SSHEndpoint or None; `sandbox` is
     the VPS sandbox-host SSHEndpoint (the air-gapped exec container) or None.
@@ -160,7 +193,16 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     normal, it just doesn't print anything until the caller reads RunResult.
     Errors and interrupts still print regardless, since those aren't narration.
     `max_run_seconds`, when given, overrides cfg's wall-clock budget for this
-    one call without touching the persisted config."""
+    one call without touching the persisted config.
+    `inbox_path`, when given, is polled once per turn boundary for operator
+    messages written by a separate process (`go say`) and woven into the live
+    conversation — the channel for talking to a run that's already going.
+    `on_run_started(run_id, run_dir)`, when given, fires right after the run
+    directory is created, so a caller in another process can learn the run_id
+    before the run finishes; a failing callback never breaks the run.
+    `show_thinking` prints the model's extracted <think> reasoning alongside
+    the regular narration (purely a display choice — the context sent back to
+    the model is unaffected; reasoning is still never re-injected into it)."""
     out = (lambda *a, **k: None) if quiet else print
     if confirm_fn is None:
         from hermes.confirm import confirm as confirm_fn
@@ -183,6 +225,11 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     host_records = hosts_mod.load_hosts()
     env.setdefault("managed_hosts", hosts_mod.hosts_env_line(host_records))
     run_id, run_dir = project.new_run()
+    if on_run_started is not None:
+        try:
+            on_run_started(run_id, run_dir)
+        except Exception:
+            pass  # a caller's bookkeeping must never break the run
     transcript = run_dir / "transcript.jsonl"
 
     def log(entry: dict):
@@ -306,6 +353,12 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                 messages.append({"role": "user", "content": warn})
                 log({"role": "user", "content": warn})
                 out(yellow("  (85% of the time budget used — telling the model to wrap up)"))
+            if inbox_path is not None:
+                for msg in _drain_inbox(inbox_path):
+                    op_msg = package.operator_message(msg)
+                    messages.append({"role": "user", "content": op_msg})
+                    log({"role": "operator", "content": msg})
+                    out(magenta("  (operator) ") + dim(_brief(msg, 200)))
             if compaction.maybe_compact(
                 messages, stable_prefix, backend, cfg, context_window,
                 schema_chars, think_re=think_re, log=log,
@@ -316,6 +369,8 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
             if inner_voice:
                 for seg in extract_think(result.content, think_re):
                     think_log({"turn": turns, "role": "assistant", "content": seg})
+                    if show_thinking:
+                        out(dim("  ") + magenta("[inner voice] ") + dim(seg))
             log(
                 {
                     "role": "assistant",

@@ -292,3 +292,13 @@ def stall_nudge(repeated: bool = False) -> str:
             "acting. Stop announcing and make the tool call NOW."
         )
     return text
+
+
+def operator_message(text: str) -> str:
+    """Wraps a message the operator sent live, mid-run (`go say`), so the
+    model reads it as new direction rather than part of the original prompt."""
+    return (
+        "[operator message — sent live while you were mid-run; read and act "
+        "on it now, it isn't part of the original prompt:]\n\n"
+        f"{text.strip()}"
+    )
