@@ -208,6 +208,7 @@ tiers.
 | `host_shell`, `host_read/write` | **your servers** | reads free; anything mutating asks y/n |
 | `http_request`, `web_search` | VPS | GET free; POST etc. ask you |
 | `write_note`, `finish_run` | VPS | free |
+| `ask_operator` | VPS | free; only offered during a live `go` session — pauses the run to ask you a question and waits for your reply |
 | `list_toolbox` / `equip_tool` | — | library tools load on demand |
 | `forge_tool` | VPS | you review the source before it loads |
 | `load_skill` / `write_skill` | VPS | free (skills on); scoped to the skills dirs |

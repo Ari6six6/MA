@@ -4,15 +4,14 @@ loop -> a final answer + a summary the next run will inherit."""
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import urlparse
 
 from hermes import checkpoint
 from hermes import compaction
+from hermes import go_state
 from hermes import hosts as hosts_mod
 from hermes import http_policy
 from hermes import package
@@ -152,36 +151,6 @@ def _normalize(text: str) -> str:
     return " ".join(text.split()).lower()
 
 
-def _drain_inbox(inbox_path) -> list[str]:
-    """Pop every pending message a separate `hermes go say` process wrote,
-    atomically. Renaming the file aside before reading (instead of
-    read-then-truncate) means a `go say` racing this drain either lands in the
-    detached old file — read right here — or recreates the path fresh, picked
-    up next turn boundary: never silently lost, only possibly delayed a turn."""
-    inbox_path = Path(inbox_path)
-    if not inbox_path.exists():
-        return []
-    tmp = inbox_path.with_name(inbox_path.name + f".draining.{os.getpid()}")
-    try:
-        inbox_path.rename(tmp)
-    except OSError:
-        return []
-    try:
-        text = tmp.read_text()
-    finally:
-        tmp.unlink(missing_ok=True)
-    out: list[str] = []
-    for line in text.splitlines():
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        msg = entry.get("text")
-        if isinstance(msg, str) and msg.strip():
-            out.append(msg.strip())
-    return out
-
-
 def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         sandbox=None, quiet=False, max_run_seconds=None, inbox_path=None,
         on_run_started=None, show_thinking=False):
@@ -276,6 +245,14 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         log({"role": m["role"], "content": m["content"][:200000]})
 
     registry = build_registry(project, cfg, confirm_fn)
+    # Live two-way dialogue: only when there's an inbox to reply through (a `go`
+    # session the operator is watching). Without a live channel `ask_operator`
+    # would have no one to answer, so it isn't offered at all on foreground/
+    # one-shot runs rather than dangling as a tool that always falls back.
+    if inbox_path is not None:
+        from hermes.tools import dialogue
+        for t in dialogue.TOOLS:
+            registry.register(t)
     ctx = ToolContext(
         project=project,
         cfg=cfg,
@@ -287,6 +264,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         backend=backend,  # so the delegate tool can run a child loop
         think_re=think_re,
         depth=0,
+        inbox_path=inbox_path,  # ask_operator blocks on this for the operator's reply
     )
     ctx.registry = registry
     ctx._delegate_log = log  # child steps land in the same transcript
@@ -300,6 +278,9 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         cfg.get("max_run_seconds", 0) if max_run_seconds is None else max_run_seconds
     )
     run_started = time.monotonic()
+    # Hard wall-clock deadline (or None when unbounded), so ask_operator can cap
+    # its blocking wait and never push the run past its budget.
+    ctx.run_deadline = run_started + max_run_seconds if max_run_seconds else None
     time_wrapup_sent = False
     nudges_left = cfg.get("stall_nudges", 2)
     phantom_nudges_left = cfg.get("phantom_nudges", 1)
@@ -354,7 +335,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                 log({"role": "user", "content": warn})
                 out(yellow("  (85% of the time budget used — telling the model to wrap up)"))
             if inbox_path is not None:
-                for msg in _drain_inbox(inbox_path):
+                for msg in go_state.drain_inbox(inbox_path):
                     op_msg = package.operator_message(msg)
                     messages.append({"role": "user", "content": op_msg})
                     log({"role": "operator", "content": msg})

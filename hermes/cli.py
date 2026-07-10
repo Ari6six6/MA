@@ -6,6 +6,8 @@
   go attach [space] watch a running `go` live — narration + inner voice —
                      detach any time with Ctrl-C, it keeps running
   go say [space] <text>   send it a message while it's running
+                     (also how you answer when the agent asks YOU something —
+                     it can pause mid-run and wait for your reply)
   go status         list what's running
   run <text>        talk to the agent in the foreground, narrated turn by
                      turn, inside the current project (alias: r)
@@ -249,7 +251,14 @@ def cmd_go(cfg, args: str) -> None:
     gets woven straight into that conversation, and you watch it land — no
     separate `say` step needed for the common case. Either way you're looking
     at it happen in real time; Ctrl-C is the only way to step back, and it
-    keeps running when you do (survives closing the terminal entirely)."""
+    keeps running when you do (survives closing the terminal entirely).
+
+    The conversation runs both ways: the agent can pause mid-run and ask YOU a
+    question when it hits a genuinely influential fork (via its `ask_operator`
+    tool). It shows up right here in the live view, and you answer the same way
+    you say anything else — Ctrl-C out of the tail if you're watching, then
+    `go <your answer>` (or `go say <space> <answer>`). It picks the reply up and
+    carries on."""
     parts = args.split(maxsplit=1)
     sub, rest = (parts[0], parts[1] if len(parts) > 1 else "") if parts else ("", "")
     if sub == "attach":
@@ -1015,7 +1024,7 @@ def cmd_tools(cfg) -> None:
 HELP = f"""\
 {cyan('go')} <text>             background run, no project ceremony, capped at {GO_MAX_RUN_SECONDS // 60} min
 {cyan('go')} attach [space]     watch it live (narration + inner voice) — Ctrl-C to detach
-{cyan('go')} say [space] <text>  send it a message while it's running
+{cyan('go')} say [space] <text>  send it a message — and how you answer when it asks you something
 {cyan('go')} status             list what's running
 {cyan('run')} <text>            foreground, narrated turn by turn, needs a selected project {dim('(alias: r)')}
 {cyan('space')} / {cyan('project')} new|use|list  a space IS a project, same files on disk {dim('(alias: p)')}

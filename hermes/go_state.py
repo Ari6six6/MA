@@ -89,6 +89,38 @@ def active_entry(space: str) -> dict | None:
     return entry
 
 
+def drain_inbox(inbox_path) -> list[str]:
+    """Atomically pop every pending operator message a separate `go`/`go say`
+    process wrote. Renaming the file aside before reading (instead of
+    read-then-truncate) means a writer racing this drain either lands in the
+    detached old file — read right here — or recreates the path fresh, picked
+    up on the next drain: never silently lost, only possibly delayed. Shared by
+    the run loop's per-turn poll and the `ask_operator` tool's blocking wait, so
+    a reply lands in exactly one of them, never both."""
+    inbox_path = Path(inbox_path)
+    if not inbox_path.exists():
+        return []
+    tmp = inbox_path.with_name(inbox_path.name + f".draining.{os.getpid()}")
+    try:
+        inbox_path.rename(tmp)
+    except OSError:
+        return []
+    try:
+        text = tmp.read_text()
+    finally:
+        tmp.unlink(missing_ok=True)
+    out: list[str] = []
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg = entry.get("text")
+        if isinstance(msg, str) and msg.strip():
+            out.append(msg.strip())
+    return out
+
+
 def list_active() -> dict[str, dict]:
     """Every space with a live process, pruning dead ones as a side effect."""
     out: dict[str, dict] = {}

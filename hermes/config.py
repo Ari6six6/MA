@@ -32,6 +32,11 @@ DEFAULTS: dict = {
     "delegate_max_seconds": 0,  # same idea, scoped to one delegated child call —
                                 # a stuck or slow-going child gets reaped and
                                 # returns a partial result instead of hanging.
+    "ask_operator_timeout": 900,  # how long the ask_operator tool blocks waiting
+                                  # for a live reply before telling the agent to
+                                  # decide for itself. Always also capped by the
+                                  # run's hard time budget, so a question can never
+                                  # push a run past its wall-clock cap.
     "stall_nudges": 2,  # bounce prose-only turns back N times before accepting them as final
     "phantom_nudges": 1,  # bounce a finish that pasted code but wrote/ran nothing
     "verify_code_runs": True,  # after a code task, an independent pass re-runs it in the sandbox

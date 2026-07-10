@@ -64,6 +64,15 @@ class ToolContext:
     # default, unchanged). Set on an embodied child so its shell runs in its own
     # body on the village network instead of the one shared workshop.
     body: str | None = None
+    # Live operator dialogue: the JSONL inbox a running `go` session writes to
+    # (`go`/`go say`). When set, `ask_operator` can pose a question and block on
+    # a reply here; None means no live channel (a foreground/one-shot run), and
+    # the tool degrades to "decide for yourself" instead of hanging.
+    inbox_path: object | None = None
+    # Monotonic wall-clock deadline for this run (run_started + max_run_seconds),
+    # or None when the run is unbounded. `ask_operator` caps its wait by this so a
+    # blocked question can never push the run past its hard budget.
+    run_deadline: float | None = None
 
 
 def obj_schema(properties: dict, required: list[str]) -> dict:

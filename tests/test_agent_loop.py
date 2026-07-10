@@ -493,6 +493,40 @@ def test_inbox_none_is_a_no_op(project, cfg):
     assert result.summary == "done"
 
 
+def test_ask_operator_is_not_a_builtin(project, cfg):
+    # The dialogue tool is added by agent.run only when a live inbox exists; it
+    # must never be a plain builtin (that would let a channel-less run offer a
+    # tool that can only ever fall back).
+    from hermes.tools import build_registry, dialogue
+
+    base = build_registry(project, cfg, lambda *a, **k: True)
+    assert "ask_operator" not in base.names()
+    assert [t.name for t in dialogue.TOOLS] == ["ask_operator"]
+
+
+def test_ask_operator_runs_end_to_end_and_falls_back_when_unanswered(
+    project, cfg, tmp_path
+):
+    cfg.set("stall_nudges", 0)
+    cfg.set("ask_operator_timeout", 0)  # empty inbox -> immediate fallback, no wait
+    inbox = tmp_path / "inbox.jsonl"  # exists as a channel, but no message waiting
+    inbox.write_text("")
+
+    result = run_agent(
+        project, cfg,
+        [
+            {"tool": "ask_operator", "args": {"question": "which database?"}},
+            {"tool": "finish_run", "args": {"summary": "picked sqlite myself"}},
+        ],
+        inbox_path=inbox,
+    )
+    assert not result.aborted
+    assert result.summary == "picked sqlite myself"
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "ask_operator" in transcript
+    assert "No reply" in transcript  # the graceful fallback reached the model
+
+
 def test_show_thinking_prints_inner_voice_when_enabled(project, cfg, capsys):
     run_agent(
         project, cfg,
