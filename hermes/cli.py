@@ -17,9 +17,9 @@
                      it can pause mid-run and wait for your reply)
   go status         list what's running
   run <text>        a single foreground exchange (one prompt, one run), inside
-                     the current project (alias: r)
-  space / project    new/use/list — a space IS a project, same files on disk
-                     (alias: p)
+                     the current space (alias: r)
+  space             new/use/list — a space is one workbench of work: its own
+                     mission, files, and run history (alias: p)
   gpu ...           attach/serve/status/tunnel/up/down (alias: g)
   mission/notes/history/summaries/tools/config/persona/help/quit
 """
@@ -70,11 +70,10 @@ def _current_project(cfg) -> Project | None:
 
 
 def _ensure_space(cfg) -> Project:
-    """`go`'s no-ceremony entry point: use the current project/space if one is
-    selected, else silently create-and-select the default one. Same on-disk
-    project layout as always (`project`/`space new` still work if you want
-    more than one) — this just means `go` never blocks on "no current
-    project"."""
+    """`go`'s no-ceremony entry point: use the current space if one is selected,
+    else silently create-and-select the default one. `space new` still makes a
+    separate workbench if you want more than one — this just means `go` never
+    blocks on "no space selected"."""
     project = _current_project(cfg)
     if project is not None:
         return project
@@ -231,9 +230,8 @@ def cmd_run(cfg, args: str) -> None:
         return
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project")
-              + dim(" — `project new <name>` or `project use <name>` "
-                    "(or just `go`, which doesn't need one)"))
+        print(yellow("no space yet")
+              + dim(" — just use `go <something>`, which starts one for you"))
         return
     busy = go_state.active_entry(project.name)
     if busy:
@@ -303,7 +301,7 @@ def cmd_session(cfg, args: str) -> None:
                 msg, first = first, ""
             else:
                 try:
-                    msg = input(f"{magenta('you')}({cyan(project.name)})> ").strip()
+                    msg = input(magenta("you> ")).strip()
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break
@@ -393,9 +391,9 @@ def cmd_go(cfg, args: str) -> None:
             return
 
     go_state.start_entry(project.name, proc.pid, kind="go", log=str(log_p), inbox=str(inbox_p))
-    print(dim(f"— '{project.name}' (pid {proc.pid}, hard cap {GO_MAX_RUN_SECONDS // 60} min) "
-               "— watching it live, Ctrl-C to leave it running in the background —"))
-    _go_tail(project.name, go_state.active_entry(project.name))
+    print(dim(f"— '{project.name}' started (up to {GO_MAX_RUN_SECONDS // 60} min) — "
+               "watching live · type `go <message>` to steer it · Ctrl-C leaves it running —"))
+    _go_tail(project.name, go_state.active_entry(project.name), replay="all")
 
 
 def _go_target_space(cfg, name: str) -> str:
@@ -406,14 +404,34 @@ def _go_append_inbox(space: str, entry: dict, text: str) -> None:
     line = json.dumps({"ts": time.strftime("%Y-%m-%d %H:%M"), "text": text.strip()})
     with open(entry["inbox_path"], "a") as f:
         f.write(line + "\n")
-    print(green(f"→ sent to '{space}'") + dim(" — picking it up now:"))
+    # Anchor the message you just sent, clearly attributed, so it doesn't vanish
+    # into the stream — and set the expectation that it's queued, not instant.
+    print()
+    print(bold(green("  you: ")) + text.strip())
+    print(dim("  delivered — it reads this at its next step; watching for the reply…"))
 
 
-def _go_tail(space: str, entry: dict) -> None:
-    """Stream a running space's log live until it finishes or the operator
-    Ctrl-Cs out — the shared engine behind `go`, `go say`, and `go attach`."""
+def _go_tail(space: str, entry: dict, replay: str = "tail") -> None:
+    """Stream a running space's live output until it finishes or you Ctrl-C out
+    — the shared engine behind `go`, `go say`, and `go attach`.
+
+    `replay` controls what you see before the live follow begins:
+      "all"  — the whole log from line one (you just started it; watch it all)
+      "tail" — a little recent context, then only new output (you're checking
+               back in; don't re-dump the entire conversation every time)
+    Following from the current end is the fix for the old behavior, where every
+    `say`/`attach` replayed the whole log from the top."""
     log_p = Path(entry["log_path"])
     pos = 0
+    if replay != "all" and log_p.exists():
+        with log_p.open("r") as f:
+            existing = f.read()
+            pos = f.tell()  # follow from here; don't replay everything above
+        recent = existing.splitlines()[-15:]
+        if any(ln.strip() for ln in recent):
+            print(dim("  -- recent --"))
+            print("\n".join(recent))
+            print(dim("  -- live --"))
     try:
         while True:
             entry = go_state.active_entry(space)
@@ -486,7 +504,10 @@ def cmd_go_status(cfg, args: str) -> None:
               f"{run_label:<9}{elapsed_label:<8}{dim(pid_label)}")
 
 
-def cmd_project(cfg, args: str) -> None:
+def cmd_space(cfg, args: str) -> None:
+    """A space is one workbench of your work — its own mission, files, and run
+    history. You get one automatically; you only need this to keep two unrelated
+    efforts apart. `space` lists them, `space new <name>` / `space use <name>`."""
     parts = args.split()
     sub = parts[0] if parts else "list"
     pdir = _projects_dir(cfg)
@@ -498,7 +519,7 @@ def cmd_project(cfg, args: str) -> None:
             return
         cfg.set("current_project", parts[1], coerce=False)
         cfg.save()
-        print(green(f"project '{parts[1]}' created and selected.") + dim(" Edit its mission: `mission edit`"))
+        print(green(f"space '{parts[1]}' created and switched to.") + dim(" Set its brief: `mission edit`"))
     elif sub == "use" and len(parts) > 1:
         try:
             Project.load(pdir, parts[1])
@@ -512,7 +533,7 @@ def cmd_project(cfg, args: str) -> None:
         current = cfg.get("current_project")
         names = Project.list_names(pdir)
         if not names:
-            print(dim("(no projects yet — `project new <name>`)"))
+            print(dim("(no spaces yet — `go <something>` starts one)"))
         for n in names:
             print(green("* ") + bold(n) if n == current else "  " + n)
 
@@ -812,7 +833,7 @@ def cmd_directives(cfg, args: str) -> None:
     """
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     sub = args.strip()
     if sub == "edit":
@@ -847,7 +868,7 @@ def cmd_retrospect(cfg, args: str) -> None:
     """
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     if args.strip() == "now":
         if cfg.get("backend") != "mock" and not _probe_vllm(cfg):
@@ -894,7 +915,7 @@ def cmd_debug(cfg, args: str) -> None:
     from hermes import package
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     sub = (args.split() or ["prefix"])[0]
     if sub != "prefix":
@@ -936,7 +957,7 @@ def cmd_skills(cfg, args: str) -> None:
     from hermes import skills as skills_mod
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     parts = args.split(maxsplit=1)
     sub = parts[0] if parts else "list"
@@ -971,7 +992,7 @@ def cmd_checkpoint(cfg, args: str) -> None:
     from hermes import checkpoint
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     parts = args.split(maxsplit=1)
     sub = parts[0] if parts else "list"
@@ -982,7 +1003,7 @@ def cmd_checkpoint(cfg, args: str) -> None:
             print(red(f"no such checkpoint: {cid}") + dim(" — `checkpoint` to list"))
             return
         from hermes.confirm import confirm
-        if not confirm(f"revert project '{project.name}' to checkpoint {cid}?",
+        if not confirm(f"revert space '{project.name}' to checkpoint {cid}?",
                        detail=dim("  overwrites workspace/tools/skills/notes/etc. "
                                   "with the snapshot")):
             print(dim("cancelled."))
@@ -1065,7 +1086,7 @@ def cmd_allow(cfg, args: str) -> None:
 def cmd_info(cfg, what: str, args: str) -> None:
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     if what == "mission":
         if args.strip() == "edit":
@@ -1090,7 +1111,7 @@ def cmd_tools(cfg) -> None:
     from hermes.tools import build_registry
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     registry = build_registry(project, cfg, confirm)
     for name in registry.names():
@@ -1127,7 +1148,7 @@ HELP_MORE = f"""\
 {cyan('run')} <text>            one foreground exchange, then back to the prompt {dim('(alias: r)')}
 
 {bold('Where your work lives')}
-{cyan('space')} / {cyan('project')} new|use|list  a space is just a folder of your work (mission, files, run history) {dim('(alias: p)')}
+{cyan('space')} new|use|list    a space is one workbench of work (its own mission, files, run history) {dim('(alias: p)')}
 {cyan('mission')} [edit]        the standing brief   ·   {cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
 {cyan('checkpoint')} [restore <id>]  snapshots taken before the agent changes files
 
@@ -1160,8 +1181,8 @@ def dispatch(cfg, line: str) -> bool:
         cmd_go(cfg, rest)
     elif cmd == "run":
         cmd_run(cfg, rest)
-    elif cmd in ("project", "space"):
-        cmd_project(cfg, rest)
+    elif cmd in ("space", "project"):  # `project` kept as a quiet alias for muscle memory
+        cmd_space(cfg, rest)
     elif cmd == "gpu":
         cmd_gpu(cfg, rest)
     elif cmd == "host":

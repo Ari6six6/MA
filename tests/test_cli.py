@@ -47,7 +47,7 @@ def test_go_spawns_detached_subprocess_and_watches_it(cfg, capsys, monkeypatch):
     # by the attach tests.
     monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, None))
     monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(cli, "_go_tail", lambda space, entry: tailed.setdefault("space", space))
+    monkeypatch.setattr(cli, "_go_tail", lambda space, entry, **k: tailed.setdefault("space", space))
 
     cli.cmd_go(cfg, "hello there")
 
@@ -67,7 +67,7 @@ def test_go_spawns_detached_subprocess_and_watches_it(cfg, capsys, monkeypatch):
     go_state.clear_entry(cli.DEFAULT_SPACE)
 
     out = capsys.readouterr().out
-    assert "watching it live" in out
+    assert "watching live" in out
 
 
 def test_go_on_busy_space_sends_and_watches_instead_of_spawning(cfg, capsys, monkeypatch):
@@ -83,13 +83,13 @@ def test_go_on_busy_space_sends_and_watches_instead_of_spawning(cfg, capsys, mon
         raise AssertionError("should not spawn a second background run while one is busy")
 
     monkeypatch.setattr(cli.subprocess, "Popen", fail_popen)
-    monkeypatch.setattr(cli, "_go_tail", lambda space, entry: tailed.setdefault("space", space))
+    monkeypatch.setattr(cli, "_go_tail", lambda space, entry, **k: tailed.setdefault("space", space))
 
     cli.cmd_go(cfg, "another one")
 
     assert json.loads(inbox.read_text().splitlines()[0])["text"] == "another one"
     assert tailed["space"] == project.name  # dropped straight into watching it, not a flat refusal
-    assert "sent" in capsys.readouterr().out
+    assert "delivered" in capsys.readouterr().out
     go_state.clear_entry(project.name)
 
 
@@ -126,6 +126,44 @@ def test_go_attach_streams_growing_log_and_detaches_without_killing_it(
     go_state.clear_entry("space")
 
 
+def test_go_tail_follows_from_end_instead_of_replaying_the_whole_log(
+    cfg, tmp_path, capsys, monkeypatch
+):
+    log = tmp_path / "live.log"
+    log.write_text("\n".join(f"old line {i}" for i in range(1, 41)) + "\n")  # 40 lines
+    go_state.start_entry("space", os.getpid(), kind="go",
+                          log=str(log), inbox=str(tmp_path / "x.inbox"))
+    calls = {"n": 0}
+
+    def fake_sleep(_secs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            log.write_text(log.read_text() + "NEW after attach\n")
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+    cli._go_tail("space", go_state.active_entry("space"), replay="tail")
+
+    out = capsys.readouterr().out
+    assert "NEW after attach" in out       # it follows the live tail
+    assert "old line 40" in out            # a little recent context is shown
+    assert "old line 1" not in out         # but the whole log is NOT re-dumped
+    go_state.clear_entry("space")
+
+
+def test_go_tail_replay_all_shows_the_whole_log(cfg, tmp_path, capsys, monkeypatch):
+    log = tmp_path / "live.log"
+    log.write_text("old line 1\nold line 2\n")
+    go_state.start_entry("space", os.getpid(), kind="go",
+                          log=str(log), inbox=str(tmp_path / "x.inbox"))
+    monkeypatch.setattr(cli.time, "sleep",
+                        lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
+    cli._go_tail("space", go_state.active_entry("space"), replay="all")
+    assert "old line 1" in capsys.readouterr().out  # started it fresh: watch from the top
+    go_state.clear_entry("space")
+
+
 def test_go_say_nothing_running(cfg, capsys):
     cli.cmd_go_say(cfg, "hello")
     assert "nothing running" in capsys.readouterr().out
@@ -138,7 +176,7 @@ def test_go_say_appends_to_inbox_and_watches_it_land(cfg, tmp_path, capsys, monk
     go_state.start_entry(project.name, os.getpid(), kind="go",
                           log=str(tmp_path / "x.log"), inbox=str(inbox))
     tailed = {}
-    monkeypatch.setattr(cli, "_go_tail", lambda space, entry: tailed.setdefault("space", space))
+    monkeypatch.setattr(cli, "_go_tail", lambda space, entry, **k: tailed.setdefault("space", space))
 
     cli.cmd_go_say(cfg, "keep going")
 
@@ -146,7 +184,7 @@ def test_go_say_appends_to_inbox_and_watches_it_land(cfg, tmp_path, capsys, monk
     assert len(lines) == 1
     assert json.loads(lines[0])["text"] == "keep going"
     assert tailed["space"] == project.name  # `say` watches it land, doesn't just fire and forget
-    assert "sent" in capsys.readouterr().out
+    assert "delivered" in capsys.readouterr().out
     go_state.clear_entry(project.name)
 
 

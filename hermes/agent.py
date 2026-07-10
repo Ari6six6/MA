@@ -18,7 +18,7 @@ from hermes import package
 from hermes.llm import ChatResult, LLMTransportError
 from hermes.tools import build_registry
 from hermes.tools.base import ToolContext
-from hermes.ui import cyan, dim, green, magenta, red, yellow
+from hermes.ui import bold, cyan, dim, green, magenta, red, yellow
 
 THINK_RE = re.compile(r"<(?:seed:)?think>.*?</(?:seed:)?think>\s*", re.S)
 # Just the reasoning tags, for recovering the inner text (inner-voice log).
@@ -345,7 +345,11 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     op_msg = package.operator_message(msg)
                     messages.append({"role": "user", "content": op_msg})
                     log({"role": "operator", "content": msg})
-                    out(magenta("  (operator) ") + dim(_brief(msg, 200)))
+                    # A clear, separated banner so a steer you sent mid-run is
+                    # unmistakable when it lands — not a dim line lost in the
+                    # narration. The model is prompted to reply, which prints next.
+                    out("")
+                    out(bold(magenta("  >> you: ")) + magenta(_brief(msg, 300)))
             if compaction.maybe_compact(
                 messages, stable_prefix, backend, cfg, context_window,
                 schema_chars, think_re=think_re, log=log,
