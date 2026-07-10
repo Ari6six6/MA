@@ -51,7 +51,7 @@ from hermes.sandbox import capabilities as sandbox_capabilities, local_endpoint
 from hermes.ssh import SSHEndpoint, SSHError, kill_pid, parse_ssh_string, pid_alive
 from hermes.ui import bold, cyan, dim, green, magenta, red, yellow
 
-BANNER = f"{bold(magenta('hermes'))} {dim('v' + __version__)} — type {cyan('help')}"
+BANNER = f"{bold(magenta('hermes'))} {dim('v' + __version__)}"
 
 
 # ---------------------------------------------------------------- helpers
@@ -1101,22 +1101,18 @@ def cmd_tools(cfg) -> None:
         print(f"  {cyan(name)}: {t.description[:90]}")
 
 
-# The whole program in five lines. `help more` opens everything else — it's all
-# still there, just out of the way until you want it.
+# The whole program in a handful of short lines that don't wrap on a phone.
+# `help more` opens everything else — still there, just out of the way.
 HELP = f"""\
-{bold('What you actually need:')}
-
-  {cyan('go')} <what you want done>
-      Start a {GO_MAX_RUN_SECONDS // 60}-minute work session and watch it happen. It runs in the
-      background (survives closing the phone), narrating as it goes, and it can
-      stop to ask YOU a question. Type {cyan('go')} <more> any time to steer it while
-      it works. {dim('Ctrl-C steps out and leaves it running; `go` again to drop back in.')}
-
-  {cyan('go')}                    drop back into whatever's running (or see the usage)
-  {cyan('go status')}             what's running right now
-  {cyan('gpu attach')}            connect a GPU        {cyan('gpu serve')}   load the model onto it
-  {cyan('mission')} [edit]        the standing brief the agent always sees
-  {cyan('help more')}             everything else      {cyan('quit')}      leave
+{bold('the essentials')}
+{cyan('go')} <text>      start a {GO_MAX_RUN_SECONDS // 60}-min session; watch it, steer it, it can ask you back
+{cyan('go')}             drop back into what's running
+{cyan('go status')}      what's running now
+{cyan('gpu attach')}     get a GPU
+{cyan('gpu serve')}      load the model onto it
+{cyan('mission')}        the brief it always reads {dim('(mission edit to change)')}
+{cyan('help more')}      everything else
+{cyan('quit')}           leave
 """
 
 # Everything the essentials view leaves out. Power is all here; it just isn't in
@@ -1202,25 +1198,34 @@ def main() -> None:
     cfg.save()  # materialize defaults + persona on first start
     hermes_home().mkdir(parents=True, exist_ok=True)
     print(BANNER)
-    print(dim("type ") + cyan("go <what you want done>") + dim(" to start work · ")
-          + cyan("help") + dim(" for the essentials"))
+    print(dim("start with  ") + cyan("go <what you want done>") + dim("   ·   ")
+          + cyan("help") + dim(" for the rest"))
 
     session = None
     ansi = None
-    patch_stdout = None
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.formatted_text import ANSI as ansi
         from prompt_toolkit.history import FileHistory
-        from prompt_toolkit.patch_stdout import patch_stdout
         session = PromptSession(history=FileHistory(str(hermes_home() / "repl_history")))
     except Exception:
         pass
 
     def _loop() -> None:
         while True:
-            proj = cfg.get("current_project") or "-"
-            prompt_text = f"{magenta('hermes')}({cyan(proj)})> "
+            # Name the space in the prompt only when you actually have more than
+            # one to keep straight. With a single space (the common case) the
+            # bare `hermes>` reads as "just here", not "a project is selected" —
+            # which is the point: you never chose a project, so don't show one.
+            proj = cfg.get("current_project") or ""
+            try:
+                multi = len(Project.list_names(_projects_dir(cfg))) > 1
+            except Exception:
+                multi = False
+            if proj and multi:
+                prompt_text = f"{magenta('hermes')} {cyan(proj)}{magenta(' > ')}"
+            else:
+                prompt_text = f"{magenta('hermes> ')}"
             try:
                 line = session.prompt(ansi(prompt_text)) if session else input(prompt_text)
             except (EOFError, KeyboardInterrupt):
@@ -1232,16 +1237,12 @@ def main() -> None:
             except Exception as e:  # the REPL must survive anything
                 print(red(f"error: {type(e).__name__}: {e}"))
 
-    # `go` finishes on a background thread and prints its result whenever it
-    # lands — patch_stdout is prompt_toolkit's documented way to let that kind
-    # of background output interleave cleanly above a live prompt line instead
-    # of mangling it. Only relevant when the prompt_toolkit session is in play;
-    # the plain-input() fallback has no live line to protect.
-    if patch_stdout is not None:
-        with patch_stdout():
-            _loop()
-    else:
-        _loop()
+    # No patch_stdout: `go` runs as a detached subprocess and its output is
+    # streamed synchronously by `_go_tail`, so nothing prints into this REPL
+    # from a background thread. prompt_toolkit's StdoutProxy would only get in
+    # the way — it escapes the raw ANSI in our print()s into literal `^[[2m`
+    # gibberish. Printing straight to the terminal renders the colors.
+    _loop()
     print(dim("bye."))
 
 
