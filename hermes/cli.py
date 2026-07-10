@@ -1,16 +1,23 @@
 """The Hermes REPL — short commands for a phone keyboard.
 
-  go <text>         no project ceremony: runs in a detached background
-                     process (survives closing the phone), hard-capped at
-                     GO_MAX_RUN_SECONDS
+  session [text]    the default way to work: a live session you sit INSIDE
+                     with the agent, sharing one time budget (up to
+                     GO_MAX_RUN_SECONDS). You send a message, it works
+                     narrated in front of you, it can pause to ask YOU
+                     something, then it hands the turn back — `done` ends it.
+                     Not a job you fire off; a room you're both in. (alias: s)
+  go <text>         fire-and-forget instead: a detached background process
+                     (survives closing the phone), hard-capped at
+                     GO_MAX_RUN_SECONDS. Use it when you DON'T want to sit
+                     with it; talk to it with `go say`, watch with `go attach`.
   go attach [space] watch a running `go` live — narration + inner voice —
                      detach any time with Ctrl-C, it keeps running
-  go say [space] <text>   send it a message while it's running
-                     (also how you answer when the agent asks YOU something —
+  go say [space] <text>   send a background `go` a message while it's running
+                     (also how you answer when it asks YOU something —
                      it can pause mid-run and wait for your reply)
   go status         list what's running
-  run <text>        talk to the agent in the foreground, narrated turn by
-                     turn, inside the current project (alias: r)
+  run <text>        a single foreground exchange (one prompt, one run), inside
+                     the current project (alias: r)
   space / project    new/use/list — a space IS a project, same files on disk
                      (alias: p)
   gpu ...           attach/serve/status/tunnel/up/down (alias: g)
@@ -243,6 +250,79 @@ def cmd_run(cfg, args: str) -> None:
                   on_run_started=lambda run_id, _run_dir: go_state.update_run_id(project.name, run_id))
     finally:
         go_state.clear_entry(project.name)
+
+
+def cmd_session(cfg, args: str) -> None:
+    """A live session you sit INSIDE with the agent — not a job you fire off.
+
+    One shared time budget (the same 42-minute ceiling as `go`, a max and not a
+    target: `session hey` is over in seconds). You drive: type your first
+    request, watch it work narrated in the foreground, answer when it asks you
+    something, and send the next message when it hands the turn back. `done` /
+    `exit` (or Ctrl-C at the prompt) ends the session; a single Ctrl-C while
+    it's working stops just that piece and hands you back the turn. Each
+    exchange is a fresh run that inherits the previous one's summary, so the
+    thread of what you're building carries across the whole session, and the
+    normal y/n gates apply because you're right here."""
+    project = _ensure_space(cfg)
+    busy = go_state.active_entry(project.name)
+    if busy:
+        print(yellow(f"'{project.name}' is busy") + dim(
+            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
+        return
+    prepared = _prepare_run(cfg)
+    if prepared is None:
+        return
+    gpu, sandbox, env, backend = prepared
+
+    total = GO_MAX_RUN_SECONDS
+    started = time.monotonic()
+    mins = total // 60
+
+    def ask_stdin(_question: str) -> str:
+        # The question banner is already printed by the tool; just take the line.
+        try:
+            return input(magenta("  reply> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ""
+
+    go_state.start_entry(project.name, os.getpid(), kind="session")
+    print(dim(f"— session in '{project.name}' — we're in this together, up to "
+              f"{mins} min. Send a message; it works, then hands you back the "
+              f"turn. `done` ends it. —"))
+    first = args.strip()
+    exchanges = 0
+    try:
+        while True:
+            remaining = total - (time.monotonic() - started)
+            if remaining <= 5:
+                print(dim(f"— the {mins}-minute session budget is spent — ending the session —"))
+                break
+            if first:
+                msg, first = first, ""
+            else:
+                try:
+                    msg = input(f"{magenta('you')}({cyan(project.name)})> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+            if msg.lower() in ("done", "exit", "quit", "bye"):
+                break
+            if not msg:
+                continue
+            exchanges += 1
+            agent.run(
+                project, msg, cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
+                max_run_seconds=int(remaining),
+                ask_operator_fn=ask_stdin,
+                on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+            )
+            left = int(max(0, total - (time.monotonic() - started)) // 60)
+            print(dim(f"— your turn — ~{left} min left in the session (`done` to end) —"))
+    finally:
+        go_state.clear_entry(project.name)
+    print(dim(f"— session ended — {exchanges} exchange(s) —"))
 
 
 def cmd_go(cfg, args: str) -> None:
@@ -1022,11 +1102,12 @@ def cmd_tools(cfg) -> None:
 
 
 HELP = f"""\
-{cyan('go')} <text>             background run, no project ceremony, capped at {GO_MAX_RUN_SECONDS // 60} min
-{cyan('go')} attach [space]     watch it live (narration + inner voice) — Ctrl-C to detach
-{cyan('go')} say [space] <text>  send it a message — and how you answer when it asks you something
+{cyan('session')} [text]         live session you sit in WITH the agent, up to {GO_MAX_RUN_SECONDS // 60} min, you drive {dim('(alias: s)')}
+{cyan('go')} <text>             detached background run (survives closing the phone), capped at {GO_MAX_RUN_SECONDS // 60} min
+{cyan('go')} attach [space]     watch a background run live — Ctrl-C to detach
+{cyan('go')} say [space] <text>  send a background run a message — and how you answer when it asks you something
 {cyan('go')} status             list what's running
-{cyan('run')} <text>            foreground, narrated turn by turn, needs a selected project {dim('(alias: r)')}
+{cyan('run')} <text>            single foreground exchange, needs a selected project {dim('(alias: r)')}
 {cyan('space')} / {cyan('project')} new|use|list  a space IS a project, same files on disk {dim('(alias: p)')}
 {cyan('mission')} [edit]        show/edit the project mission
 {cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
@@ -1052,11 +1133,14 @@ def dispatch(cfg, line: str) -> bool:
     if not line:
         return True
     cmd, _, rest = line.partition(" ")
-    cmd = {"r": "run", "p": "project", "g": "gpu", "exit": "quit", "q": "quit"}.get(cmd, cmd)
+    cmd = {"r": "run", "p": "project", "g": "gpu", "s": "session",
+           "exit": "quit", "q": "quit"}.get(cmd, cmd)
     if cmd == "quit":
         return False
     elif cmd == "help":
         print(HELP)
+    elif cmd == "session":
+        cmd_session(cfg, rest)
     elif cmd == "go":
         cmd_go(cfg, rest)
     elif cmd == "run":

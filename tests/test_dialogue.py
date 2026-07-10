@@ -51,6 +51,31 @@ def test_ask_operator_without_channel_falls_back(cfg):
     assert "No live operator channel" in out
 
 
+def test_ask_operator_foreground_uses_the_keyboard(cfg):
+    ctx = _ctx(cfg)
+    ctx.ask_operator_fn = lambda q: "go with the second one"
+    out = ask_operator({"question": "first or second?"}, ctx)
+    assert "go with the second one" in out
+
+
+def test_ask_operator_foreground_empty_reply_falls_back(cfg):
+    ctx = _ctx(cfg)
+    ctx.ask_operator_fn = lambda q: ""  # operator just hit Enter
+    out = ask_operator({"question": "anything?"}, ctx)
+    assert "No reply" in out
+
+
+def test_ask_operator_foreground_takes_precedence_over_inbox(cfg, tmp_path):
+    # A foreground session that also happens to carry an inbox must answer from
+    # the keyboard, never block on the inbox.
+    inbox = tmp_path / "s.inbox.jsonl"  # never written to
+    ctx = _ctx(cfg, inbox_path=inbox)
+    ctx.ask_operator_fn = lambda q: "keyboard wins"
+    out = ask_operator({"question": "?"}, ctx)
+    assert "keyboard wins" in out
+    assert not inbox.exists()
+
+
 def test_ask_operator_times_out_gracefully(cfg, tmp_path):
     inbox = tmp_path / "s.inbox.jsonl"  # never created -> no reply
     cfg.set("ask_operator_timeout", 0)  # don't actually wait

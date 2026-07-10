@@ -5,7 +5,8 @@ from hermes.llm import MockBackend
 
 
 def run_agent(project, cfg, script, confirm=None, gpu=None, sandbox=None,
-              inbox_path=None, on_run_started=None, show_thinking=False):
+              inbox_path=None, on_run_started=None, show_thinking=False,
+              ask_operator_fn=None):
     backend = MockBackend(script)
     return agent.run(
         project,
@@ -19,6 +20,7 @@ def run_agent(project, cfg, script, confirm=None, gpu=None, sandbox=None,
         inbox_path=inbox_path,
         on_run_started=on_run_started,
         show_thinking=show_thinking,
+        ask_operator_fn=ask_operator_fn,
     )
 
 
@@ -525,6 +527,23 @@ def test_ask_operator_runs_end_to_end_and_falls_back_when_unanswered(
     transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
     assert "ask_operator" in transcript
     assert "No reply" in transcript  # the graceful fallback reached the model
+
+
+def test_ask_operator_foreground_reads_the_keyboard_reply(project, cfg):
+    # A foreground session supplies ask_operator_fn; the agent's question gets a
+    # direct keyboard answer that flows back into the run.
+    cfg.set("stall_nudges", 0)
+    result = run_agent(
+        project, cfg,
+        [
+            {"tool": "ask_operator", "args": {"question": "which db?"}},
+            {"tool": "finish_run", "args": {"summary": "used postgres as told"}},
+        ],
+        ask_operator_fn=lambda q: "postgres, obviously",
+    )
+    assert not result.aborted
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "postgres, obviously" in transcript  # the reply reached the model
 
 
 def test_show_thinking_prints_inner_voice_when_enabled(project, cfg, capsys):

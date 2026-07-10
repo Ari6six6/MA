@@ -153,7 +153,7 @@ def _normalize(text: str) -> str:
 
 def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         sandbox=None, quiet=False, max_run_seconds=None, inbox_path=None,
-        on_run_started=None, show_thinking=False):
+        on_run_started=None, show_thinking=False, ask_operator_fn=None):
     """Execute one agent run. `env` carries gpu_status / remote_workspace /
     context_window for the package; `gpu` is an SSHEndpoint or None; `sandbox` is
     the VPS sandbox-host SSHEndpoint (the air-gapped exec container) or None.
@@ -171,7 +171,11 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     before the run finishes; a failing callback never breaks the run.
     `show_thinking` prints the model's extracted <think> reasoning alongside
     the regular narration (purely a display choice — the context sent back to
-    the model is unaffected; reasoning is still never re-injected into it)."""
+    the model is unaffected; reasoning is still never re-injected into it).
+    `ask_operator_fn(question) -> reply`, when given, is the foreground-session
+    channel for the `ask_operator` tool: the operator is at the keyboard, so the
+    tool reads their answer directly instead of polling the inbox. Providing it
+    (or `inbox_path`) is what makes `ask_operator` available at all."""
     out = (lambda *a, **k: None) if quiet else print
     if confirm_fn is None:
         from hermes.confirm import confirm as confirm_fn
@@ -245,11 +249,12 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         log({"role": m["role"], "content": m["content"][:200000]})
 
     registry = build_registry(project, cfg, confirm_fn)
-    # Live two-way dialogue: only when there's an inbox to reply through (a `go`
-    # session the operator is watching). Without a live channel `ask_operator`
-    # would have no one to answer, so it isn't offered at all on foreground/
-    # one-shot runs rather than dangling as a tool that always falls back.
-    if inbox_path is not None:
+    # Live two-way dialogue: only when there's a channel to answer through — a
+    # foreground `session` (ask_operator_fn, operator at the keyboard) or a
+    # detached `go` (inbox, operator watching a log). Without either, no one
+    # could reply, so ask_operator isn't offered at all rather than dangling as
+    # a tool that can only ever fall back.
+    if inbox_path is not None or ask_operator_fn is not None:
         from hermes.tools import dialogue
         for t in dialogue.TOOLS:
             registry.register(t)
@@ -265,6 +270,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         think_re=think_re,
         depth=0,
         inbox_path=inbox_path,  # ask_operator blocks on this for the operator's reply
+        ask_operator_fn=ask_operator_fn,  # foreground session: reply from the keyboard
     )
     ctx.registry = registry
     ctx._delegate_log = log  # child steps land in the same transcript

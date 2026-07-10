@@ -69,6 +69,11 @@ class ToolContext:
     # a reply here; None means no live channel (a foreground/one-shot run), and
     # the tool degrades to "decide for yourself" instead of hanging.
     inbox_path: object | None = None
+    # Foreground session channel: a callable(question) -> reply the operator
+    # typed at the keyboard, right here, right now. Set by the interactive
+    # `session` command; takes precedence over the inbox because in a session
+    # the operator is present, not a separate process. None outside a session.
+    ask_operator_fn: object | None = None
     # Monotonic wall-clock deadline for this run (run_started + max_run_seconds),
     # or None when the run is unbounded. `ask_operator` caps its wait by this so a
     # blocked question can never push the run past its hard budget.

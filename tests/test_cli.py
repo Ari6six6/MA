@@ -184,6 +184,78 @@ def test_run_busy_guard_checks_go_state(cfg, capsys, monkeypatch):
     go_state.clear_entry(project.name)
 
 
+def test_session_runs_exchanges_in_the_foreground_then_ends_on_done(
+    cfg, capsys, monkeypatch
+):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.set("stall_nudges", 0)
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+
+    # First message via the loop's own prompt, then `done` to leave.
+    lines = iter(["build me a thing", "done"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(lines))
+
+    cli.cmd_session(cfg, "")  # no arg -> first message comes from input()
+
+    space = cli.DEFAULT_SPACE
+    assert go_state.active_entry(space) is None  # cleaned up in finally
+    project = cli.Project.load(cli._projects_dir(cfg), space)
+    assert (project.runs_dir / "0001").exists()  # one exchange actually ran
+    out = capsys.readouterr().out
+    assert "session ended" in out
+    assert "1 exchange" in out
+
+
+def test_session_uses_the_arg_as_the_first_message(cfg, capsys, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.set("stall_nudges", 0)
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")  # end after the arg
+
+    cli.cmd_session(cfg, "kick it off with this")
+
+    project = cli.Project.load(cli._projects_dir(cfg), cli.DEFAULT_SPACE)
+    assert (project.runs_dir / "0001").exists()
+    assert "1 exchange" in capsys.readouterr().out
+
+
+def test_session_busy_guard(cfg, capsys, monkeypatch):
+    project = cli._ensure_space(cfg)
+    go_state.start_entry(project.name, os.getpid(), kind="go")
+    monkeypatch.setattr(cli, "_prepare_run",
+                        lambda cfg: (_ for _ in ()).throw(
+                            AssertionError("must not prepare a run on a busy space")))
+
+    cli.cmd_session(cfg, "hello")
+    assert "busy" in capsys.readouterr().out
+    go_state.clear_entry(project.name)
+
+
+def test_session_ends_when_the_time_budget_is_spent(cfg, capsys, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+
+    # Clock jumps a full budget between "started" and the first remaining-check,
+    # so the loop ends before any exchange — proving the shared cap bounds the
+    # whole session, not just one run.
+    ticks = iter([0.0, float(go_state.GO_MAX_RUN_SECONDS)])
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(ticks))
+
+    cli.cmd_session(cfg, "do something big")
+    out = capsys.readouterr().out
+    assert "budget is spent" in out
+    assert "0 exchange" in out
+
+
 def test_go_end_to_end_subprocess_smoke(cfg):
     """No Popen mocking: actually spawns `python -u -m hermes.go_worker` and
     waits for it to land, proving the real wiring (argv, log redirection,
