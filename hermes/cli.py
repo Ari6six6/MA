@@ -15,6 +15,7 @@
   go say [space] <text>   send a background `go` a message while it's running
                      (also how you answer when it asks YOU something —
                      it can pause mid-run and wait for your reply)
+  go stop [space|all]  killswitch: stop a detached run dead (alias: stop)
   go status         list what's running
   run <text>        a single foreground exchange (one prompt, one run), inside
                      the current space (alias: r)
@@ -28,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -348,6 +350,9 @@ def cmd_go(cfg, args: str) -> None:
     if sub == "status":
         cmd_go_status(cfg, rest)
         return
+    if sub in ("stop", "kill"):
+        cmd_go_stop(cfg, rest)
+        return
 
     text = args.strip()
     project = _ensure_space(cfg)
@@ -366,8 +371,8 @@ def cmd_go(cfg, args: str) -> None:
         return
 
     if not text:
-        print(dim("usage: go <prompt>  |  go attach [space]  |  "
-                   "go say [space] <text>  |  go status"))
+        print(dim("usage: go <prompt>  |  go attach [space]  |  go say [space] <text>"
+                   "  |  go stop [space|all]  |  go status"))
         return
     prepared = _prepare_run(cfg)  # fast fail here; the worker rebuilds its own gpu/sandbox/env/backend
     if prepared is None:
@@ -482,6 +487,91 @@ def cmd_go_say(cfg, args: str) -> None:
         return
     _go_append_inbox(space, entry, text)
     _go_tail(space, entry)
+
+
+def _stop_worker(pid: int) -> bool:
+    """Kill a detached `go` worker and everything it spawned. The worker leads
+    its own session/process group (start_new_session=True), so signalling the
+    group takes the agent AND any sandbox/ssh children with it. SIGTERM first
+    for a clean exit; if it's wedged (mid tool call, mid model round-trip) and
+    won't die in ~1.5s, SIGKILL — a killswitch that doesn't guarantee death
+    isn't a killswitch. Returns True once the pid is gone."""
+    def _sig(s):
+        try:
+            os.killpg(pid, s)  # pid == pgid for a session leader
+        except (ProcessLookupError, PermissionError):
+            pass
+        except OSError:
+            try:
+                os.kill(pid, s)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    def _gone():
+        # Reap it if it's our child — otherwise a killed worker lingers as a
+        # zombie and os.kill(pid, 0) still reports it "alive", so we could never
+        # confirm the kill. Not our child (orphaned by an earlier REPL)? init
+        # reaps it; ECHILD just means nothing to reap here.
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+        return not pid_alive(pid)
+
+    if not pid:
+        return True
+    _sig(signal.SIGTERM)
+    for _ in range(15):
+        if _gone():
+            return True
+        time.sleep(0.1)
+    _sig(signal.SIGKILL)
+    for _ in range(10):
+        if _gone():
+            return True
+        time.sleep(0.1)
+    return _gone()
+
+
+def cmd_go_stop(cfg, args: str) -> None:
+    """The killswitch. Stop a detached `go` run dead. `go stop` takes down the
+    one that's running (or the current space's); `go stop <space>` names one;
+    `go stop all` takes down everything. Foreground `run`/`session` aren't
+    touched here — those you stop with Ctrl-C, since killing them by pid would
+    kill this REPL."""
+    workers = {s: e for s, e in go_state.list_active().items() if e.get("kind") == "go"}
+    if not workers:
+        print(dim("(nothing running to stop)"))
+        return
+    target = args.strip()
+    if target == "all":
+        spaces = list(workers)
+    elif target:
+        if target not in workers:
+            print(yellow(f"nothing running in '{target}'"))
+            return
+        spaces = [target]
+    else:
+        current = cfg.get("current_project") or DEFAULT_SPACE
+        if current in workers:
+            spaces = [current]
+        elif len(workers) == 1:
+            spaces = list(workers)
+        else:
+            print(yellow("several running — name one or `go stop all`:")
+                  + dim(" " + ", ".join(sorted(workers))))
+            return
+    for space in spaces:
+        pid = workers[space].get("pid", 0)
+        ok = _stop_worker(pid)
+        go_state.clear_entry(space)
+        go_state.inbox_path(space).unlink(missing_ok=True)
+        go_state.prompt_tmp_path(space).unlink(missing_ok=True)
+        if ok:
+            print(red(f"stopped '{space}'") + dim(f" (pid {pid})"))
+        else:
+            print(red(f"could not confirm '{space}' (pid {pid}) died")
+                  + dim(" — check `go status`"))
 
 
 def cmd_go_status(cfg, args: str) -> None:
@@ -1128,6 +1218,7 @@ HELP = f"""\
 {bold('the essentials')}
 {cyan('go')} <text>      start a {GO_MAX_RUN_SECONDS // 60}-min session; watch it, steer it, it can ask you back
 {cyan('go')}             drop back into what's running
+{cyan('stop')}           {bold('killswitch')} — stop it dead now ({cyan('stop all')} for everything)
 {cyan('go status')}      what's running now
 {cyan('gpu attach')}     get a GPU
 {cyan('gpu serve')}      load the model onto it
@@ -1143,6 +1234,7 @@ HELP_MORE = f"""\
 {cyan('go')} <text>             background {GO_MAX_RUN_SECONDS // 60}-min session you watch + steer live (survives closing the phone)
 {cyan('go')} say [space] <text>  steer a background session (also how you answer when it asks you something)
 {cyan('go')} attach [space]     drop into a running session's live view — Ctrl-C to step out
+{cyan('go')} stop [space|all]   {bold('killswitch')} — stop a detached run dead {dim('(alias: stop)')}
 {cyan('go')} status             list what's running
 {cyan('session')} [text]        sit WITH it in the foreground the whole time instead {dim('(alias: s)')}
 {cyan('run')} <text>            one foreground exchange, then back to the prompt {dim('(alias: r)')}
@@ -1179,6 +1271,8 @@ def dispatch(cfg, line: str) -> bool:
         cmd_session(cfg, rest)
     elif cmd == "go":
         cmd_go(cfg, rest)
+    elif cmd in ("stop", "kill"):  # killswitch, reachable without the `go` prefix
+        cmd_go_stop(cfg, rest)
     elif cmd == "run":
         cmd_run(cfg, rest)
     elif cmd in ("space", "project"):  # `project` kept as a quiet alias for muscle memory

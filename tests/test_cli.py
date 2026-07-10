@@ -188,6 +188,56 @@ def test_go_say_appends_to_inbox_and_watches_it_land(cfg, tmp_path, capsys, monk
     go_state.clear_entry(project.name)
 
 
+def test_go_stop_kills_a_detached_worker(cfg, capsys):
+    # A real sleeping subprocess stands in for the worker; `go stop` must end it.
+    proc = cli.subprocess.Popen([cli.sys.executable, "-c", "import time; time.sleep(60)"],
+                            start_new_session=True)
+    space = cli.DEFAULT_SPACE
+    go_state.start_entry(space, proc.pid, kind="go",
+                         log=str(go_state.log_path(space)), inbox=str(go_state.inbox_path(space)))
+
+    cli.cmd_go_stop(cfg, space)  # reaps the pid, so proc.wait() may already be done
+
+    # "stopped" prints only when _stop_worker confirmed the pid is gone.
+    assert "stopped" in capsys.readouterr().out
+    assert not cli.pid_alive(proc.pid)             # it actually died
+    assert go_state.active_entry(space) is None    # state cleaned up
+
+
+def test_go_stop_nothing_running(cfg, capsys):
+    cli.cmd_go_stop(cfg, "")
+    assert "nothing running" in capsys.readouterr().out
+
+
+def test_go_stop_never_kills_a_foreground_session(cfg, capsys):
+    # A `run`/`session` entry is registered under THIS process's pid; stopping
+    # it by pid would kill the REPL, so `go stop` must ignore foreground kinds.
+    space = cli._ensure_space(cfg)
+    go_state.start_entry(space.name, os.getpid(), kind="session")
+
+    cli.cmd_go_stop(cfg, "")
+
+    assert "nothing running to stop" in capsys.readouterr().out
+    assert os.getpid() and go_state.active_entry(space.name) is not None  # untouched
+    go_state.clear_entry(space.name)
+
+
+def test_go_stop_all(cfg, capsys):
+    procs = []
+    for name in ("one", "two"):
+        p = cli.subprocess.Popen([cli.sys.executable, "-c", "import time; time.sleep(60)"],
+                             start_new_session=True)
+        procs.append(p)
+        go_state.start_entry(name, p.pid, kind="go",
+                             log=str(go_state.log_path(name)), inbox=str(go_state.inbox_path(name)))
+
+    cli.cmd_go_stop(cfg, "all")
+
+    for p in procs:
+        assert not cli.pid_alive(p.pid)
+    assert not go_state.list_active()
+
+
 def test_go_status_lists_and_prunes(cfg, capsys):
     go_state.start_entry("alive", os.getpid(), kind="go")
     go_state.start_entry("dead", 99999999, kind="go")
