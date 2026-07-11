@@ -175,6 +175,69 @@ def test_turn_cap_forces_handoff_summary(project, cfg):
     assert result.summary == "[mock] run done."
 
 
+def _metrics(project, run_id=1):
+    path = project.runs_dir / f"{run_id:04d}" / "metrics.json"
+    return json.loads(path.read_text())
+
+
+def test_reflect_nudge_off_by_default(project, cfg):
+    # Off by default: a long chain of silent tool-only turns is never bounced.
+    script = [{"tool": "write_note", "args": {"text": f"n{i}"}} for i in range(4)]
+    script.append({"tool": "finish_run", "args": {"summary": "done"}})
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    assert _metrics(project)["reflect_nudges"] == 0
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "Stop and think now" not in transcript
+
+
+def test_reflect_nudge_fires_after_silent_chain(project, cfg):
+    cfg.set("reflect_nudge_enabled", True)
+    cfg.set("reflect_nudge_every", 3)
+    cfg.set("reflect_nudges", 2)
+    script = [
+        {"tool": "write_note", "args": {"text": "n1"}},  # silent (1)
+        {"tool": "write_note", "args": {"text": "n2"}},  # silent (2)
+        {"tool": "write_note", "args": {"text": "n3"}},  # silent (3) -> nudge fires
+        {"tool": "finish_run", "args": {"summary": "done"}},
+    ]
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "Stop and think now" in transcript
+    assert _metrics(project)["reflect_nudges"] == 1
+
+
+def test_reflect_nudge_streak_resets_on_real_prose(project, cfg):
+    cfg.set("reflect_nudge_enabled", True)
+    cfg.set("reflect_nudge_every", 3)
+    cfg.set("reflect_nudges", 2)
+    long_prose = "x" * 60  # >= REFLECT_MIN_PROSE_CHARS, resets the streak
+    script = [
+        {"tool": "write_note", "args": {"text": "n1"}},  # silent (1)
+        {"tool": "write_note", "args": {"text": "n2"}},  # silent (2)
+        {"tool": "write_note", "args": {"text": "n3"}, "say": long_prose},  # resets
+        {"tool": "write_note", "args": {"text": "n4"}},  # silent (1)
+        {"tool": "write_note", "args": {"text": "n5"}},  # silent (2)
+        {"tool": "finish_run", "args": {"summary": "done"}},
+    ]
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    # 5 silent-ish turns total, but the streak never reaches 3 without a reset
+    assert _metrics(project)["reflect_nudges"] == 0
+
+
+def test_reflect_nudge_budget_does_not_loop_forever(project, cfg):
+    cfg.set("reflect_nudge_enabled", True)
+    cfg.set("reflect_nudge_every", 1)  # fires on every silent turn
+    cfg.set("reflect_nudges", 2)  # but capped at 2 for the whole run
+    script = [{"tool": "write_note", "args": {"text": f"n{i}"}} for i in range(5)]
+    script.append({"tool": "finish_run", "args": {"summary": "done"}})
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    assert _metrics(project)["reflect_nudges"] == 2  # budget exhausted, not unbounded
+
+
 def test_stub_summary_when_backend_dies(project, cfg):
     class DeadBackend:
         def chat(self, *a, **k):

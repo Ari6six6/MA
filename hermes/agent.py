@@ -26,6 +26,12 @@ _THINK_TAG_RE = re.compile(r"</?(?:seed:)?think(?:ing)?>\s*", re.S)
 VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL)", re.I)
 MAX_CONSECUTIVE_ERRORS = 3
 
+# Reflection nudge (feature 12): a turn counts as "reflective" once its visible
+# prose reaches this length — long enough to actually state an expectation or
+# assessment, short enough that an honest one-liner still counts. A turn under
+# this, even with tool calls attached, is treated as silent action.
+REFLECT_MIN_PROSE_CHARS = 40
+
 # Tools that put code on disk — the trigger for an independent verification
 # pass. (Running-only tasks like "check the logs" don't need code-verifying.)
 CODE_WRITE_TOOLS = frozenset({"write_file", "edit_file", "remote_write"})
@@ -180,7 +186,12 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     `stall_nudges` / `phantom_nudges`, when given, override cfg's nudge counts
     for this one call. `debate` sets both to 0 so a turn that's pure prose is
     accepted immediately instead of being bounced with "act or finish_run" —
-    the difference between a work run and sitting at the table talking.
+    the difference between a work run and sitting at the table talking. The
+    reflection nudge (feature 12, `reflect_nudge_enabled`) is cfg-only, no
+    per-call override: it fires whenever the run strings together too many
+    tool-call turns with no reflective prose, `debate` included — that is
+    exactly the silent-chaining `debate` doesn't otherwise guard against,
+    since its stall/phantom nudges are off.
     `extra_system`, when given, is appended to this run's system prompt (a
     per-mode framing, e.g. the debate contract) without touching persona.md."""
     out = (lambda *a, **k: None) if quiet else print
@@ -301,6 +312,14 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     phantom_nudges_left = (
         cfg.get("phantom_nudges", 1) if phantom_nudges is None else phantom_nudges
     )
+    # Reflection nudge (feature 12): a bounded number of forced stop-and-think
+    # pauses when the run chains too many tool-only turns with no reflective
+    # prose in between. Off by default (0 budget) like every opt-in feature.
+    reflect_nudges_left = (
+        cfg.get("reflect_nudges", 3) if cfg.get("reflect_nudge_enabled", False) else 0
+    )
+    reflect_nudge_every = max(1, int(cfg.get("reflect_nudge_every", 4)))
+    reflect_streak = 0
     # Verification enforcement (feature 7): a one-shot nudge when a file-mutating
     # run finishes without having executed anything. Cheap, no sandbox needed.
     verify_before_done_left = 1 if cfg.get("verify_before_done", False) else 0
@@ -327,6 +346,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     tool_errors = 0
     stall_nudges_used = 0
     phantom_bounces = 0
+    reflect_nudges_used = 0
     verify_bounces = 0
     verify_failures = 0
     tainted_turns = 0
@@ -518,6 +538,25 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                         continue
                     out(green("  (verification PASSED — the code actually runs)"))
                 break
+            # Reflection nudge (feature 12): this turn made tool calls but didn't
+            # finish. Did it say anything real about what it expected or found, or
+            # was it just another silent link in a chain of actions? Track the
+            # streak; once it's long enough, spend one forced pause making the
+            # model check its own results before it's allowed to act again.
+            if reflect_nudges_left > 0:
+                if shown and len(shown) >= REFLECT_MIN_PROSE_CHARS:
+                    reflect_streak = 0
+                else:
+                    reflect_streak += 1
+                if reflect_streak >= reflect_nudge_every:
+                    reflect_streak = 0
+                    reflect_nudges_left -= 1
+                    reflect_nudges_used += 1
+                    nudge = package.reflect_nudge()
+                    messages.append({"role": "user", "content": nudge})
+                    log({"role": "user", "content": nudge})
+                    out(yellow(f"  ({reflect_nudge_every} actions in a row with no "
+                               "reflection — pausing to think)"))
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 out(yellow("  (circuit breaker: too many consecutive tool errors)"))
                 aborted = True
@@ -582,6 +621,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         "tool_errors": tool_errors,
         "stall_nudges": stall_nudges_used,
         "phantom_bounces": phantom_bounces,
+        "reflect_nudges": reflect_nudges_used,
         "verify_bounces": verify_bounces,
         "verify_failures": verify_failures,
         "tainted_turns": tainted_turns,

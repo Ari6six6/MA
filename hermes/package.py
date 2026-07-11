@@ -307,6 +307,10 @@ def stall_nudge(repeated: bool = False) -> str:
     return text
 
 
+def reflect_nudge() -> str:
+    return _template("reflect.md").strip()
+
+
 def operator_message(text: str) -> str:
     """Wraps a message the operator sent live, mid-run (`go`/`go say`), so the
     model reads it as new direction rather than part of the original prompt —

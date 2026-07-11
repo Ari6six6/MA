@@ -471,3 +471,45 @@ per-body filesystems are deliberately deferred.
   written — `agent.py` writes `summary.md` unconditionally with a forced/stubbed
   fallback; that complaint was a house not yet opened, not a missing feature.) Each
   flag remains individually reversible.
+
+## Feature 12 — Reflection nudge (the stop-and-think gate)
+
+- **The problem it targets is narrower than "he needs an inner debate."** The
+  operator's report: a run strings together dozens of tool calls, agrees when
+  corrected, then repeats the mistake minutes later. Tracing it: `debate` mode
+  already turns off the act-or-finish pressure (`stall_nudges`/`phantom_nudges`
+  = 0) so pure reasoning is a valid turn — but nothing stops the opposite
+  failure, a chain of tool calls with *no* reasoning turn in between. That's
+  the concrete, harness-observable version of "no space for a new thought":
+  turn after turn of action with no checkpoint that compares what happened
+  against what was expected. This feature targets that specific gap, not a
+  general-purpose second personality.
+- **A streak counter over turns, not a second model.** Multi-agent debate (a
+  critic model, a second side-call per action) was the more literal reading of
+  "he needs to argue with himself," and was rejected for cost: this harness
+  runs a dense model on rented GPU-hour, and the operator has said directly
+  that a script that doesn't earn its keep is "a waste of time and money."
+  Counting consecutive silent tool-call turns and injecting one nudge message
+  is free — same mechanism as `stall_nudge`, no extra `backend.chat` round-trip.
+- **"Reflective" is measured, not asked for.** A turn only resets the streak if
+  its visible prose reaches `REFLECT_MIN_PROSE_CHARS` (40) — long enough to
+  actually state something, short enough that an honest one-liner counts. This
+  mirrors the codebase's standing refusal to trust self-report: a model saying
+  "I'll reflect on this" without content wouldn't reset anything.
+- **Fires in `debate` mode on purpose, with no per-call override.** Every other
+  nudge (`stall_nudges`, `phantom_nudges`) is something `debate` explicitly
+  turns off, because a table sitting shouldn't be pressured to act or finish.
+  This one is the opposite: `debate` is the *only* mode the operator now runs,
+  and it's exactly where a long silent tool-call chain would otherwise go
+  unchecked, since the modes that would normally catch a stuck loop (stall,
+  phantom) are off. So this is cfg-only, not threaded through `stall_nudges`/
+  `phantom_nudges` overrides, and left on in `debate` by design.
+- **Bounded per run (`reflect_nudges`, default 3), like every other bounce.**
+  Same shape as `phantom_nudges`/`verify_rounds`: spend the budget, then let
+  the run continue rather than nudging forever — a genuinely long silent
+  streak shouldn't turn into an infinite loop of its own.
+- **Off by default (`reflect_nudge_enabled`).** Follows the house rule, not the
+  "waking the faculties" exception — that exception was for features already
+  silently present but gated off; this is new behavior on every run, including
+  ones the operator hasn't reviewed the resulting nudges from yet. Reversible
+  with `config reflect_nudge_enabled true`.
