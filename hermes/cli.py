@@ -1420,20 +1420,11 @@ def main() -> None:
         pass
 
     def _loop() -> None:
+        # The prompt is always the bare `hermes> ` — no space name. You're here
+        # to talk to the one guy, not to manage projects; which workbench you're
+        # on is a `space` concern, kept out of the face you look at every line.
+        prompt_text = f"{magenta('hermes> ')}"
         while True:
-            # Name the space in the prompt only when you actually have more than
-            # one to keep straight. With a single space (the common case) the
-            # bare `hermes>` reads as "just here", not "a project is selected" —
-            # which is the point: you never chose a project, so don't show one.
-            proj = cfg.get("current_project") or ""
-            try:
-                multi = len(Project.list_names(_projects_dir(cfg))) > 1
-            except Exception:
-                multi = False
-            if proj and multi:
-                prompt_text = f"{magenta('hermes')} {cyan(proj)}{magenta(' > ')}"
-            else:
-                prompt_text = f"{magenta('hermes> ')}"
             try:
                 line = session.prompt(ansi(prompt_text)) if session else input(prompt_text)
             except (EOFError, KeyboardInterrupt):
