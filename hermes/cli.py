@@ -421,36 +421,41 @@ def cmd_debate(cfg, args: str) -> None:
 IMPROVE_FRAMING = """\
 You are at the workbench with the operator, in a session about improving
 Hermes — the harness you are running inside of, not the operator's project.
-This is deliberate practice, not idle chat. list_hermes_source and
-read_hermes_source are open for this sitting, regardless of the operator's
-usual settings, so read your own code, and read docs/DECISIONS.md and
-docs/ARCHITECTURE_NOTES.md for why it's built the way it is. Use your web
-tools to see what has actually changed in the field since you were last
-updated, and compare that honestly to what you do today. Form real opinions —
-where you are weakest, what you would build next, a design choice you would
-make differently — and say them plainly, including disagreements with the
-operator or with Hermes' own prior decisions. If you land on a concrete
-change, write it up (a proposal, a diff, a note under docs/) rather than
-leaving it as a vague impression. write_hermes_source and edit_hermes_source
-only exist this sitting if the operator has the standing self_build_enabled
-flag on too; if they don't, say what you'd change and why, and let the
-operator decide whether to open that. You are not required to produce a
-deliverable this turn — thinking it through out loud, honestly, is valid
-work."""
+This is deliberate practice, not idle chat, and it is a working session, not
+just a conversation about one. list_hermes_source, read_hermes_source,
+write_hermes_source, and edit_hermes_source are all open for this sitting,
+regardless of the operator's usual settings, so read your own code, read
+docs/DECISIONS.md and docs/ARCHITECTURE_NOTES.md for why it's built the way
+it is, and read your own RUN SUMMARIES and NOTES above — that is real data
+from your own past runs, not guesswork. Use your web tools to see what has
+actually changed in the field since you were last updated, and compare that
+honestly to what you do today. Form real opinions — where you are weakest,
+what you would build next, a design choice you would make differently — and
+say them plainly, including disagreements with the operator or with Hermes'
+own prior decisions. When you land on a concrete change, DO NOT just describe
+it: write it, with write_hermes_source or edit_hermes_source. Every write
+still pauses for the operator's explicit y/n with a real diff before anything
+lands — that pause is the checkpoint, not a reason to stop short of it. A
+fixed set of files that define the gates themselves refuse edits outright no
+matter what; if you hit one, say what you'd change and why instead. You are
+not required to produce a deliverable this turn — thinking out loud, honestly,
+is valid work — but when you're confident, build, don't just narrate."""
 
 
 def cmd_improve(cfg, args: str) -> None:
-    """A workbench, not a task: sit with the agent and reason about Hermes
-    itself — its own source, what's changed in the field since it was last
-    updated, what it would build next. Same shape as `debate` (same sitting
-    length, same live back-and-forth, same act-or-finish pressure off), but
-    the framing and the toolset differ: list_hermes_source/read_hermes_source
-    are open for this sitting even when self_build_enabled is off, set via a
-    per-call config copy that never touches the persisted flag, so the agent
-    can always look at its own code. write_hermes_source/edit_hermes_source
-    still need the real self_build_enabled on — this command never opens
-    those on its own. `persona`/`persona edit` reshapes who it is without
-    leaving the table; `done`/`exit` (or Ctrl-C at the prompt) ends it."""
+    """A workbench, not a task: sit with the agent and reason — and, when it's
+    confident, act — on Hermes itself: its own source, what's changed in the
+    field since it was last updated, what it would build next. Same shape as
+    `debate` (same sitting length, same live back-and-forth, same act-or-
+    finish pressure off), but the framing and the toolset differ: the full
+    self-build toolset (list/read/write/edit_hermes_source) is open for this
+    sitting even when self_build_enabled is off standingly, set via a per-call
+    config copy that never touches the persisted flag — the operator's real
+    config comes out the other side exactly as it went in. Every write still
+    pauses for the operator's y/n with a real diff and keeps a backup, same
+    gate as any other self-edit; the PROTECTED denylist is untouched.
+    `persona`/`persona edit` reshapes who it is without leaving the table;
+    `done`/`exit` (or Ctrl-C at the prompt) ends it."""
     project = _ensure_space(cfg)
     busy = go_state.active_entry(project.name)
     if busy:
@@ -462,10 +467,12 @@ def cmd_improve(cfg, args: str) -> None:
         return
     gpu, sandbox, env, backend = prepared
 
-    # Read-only self-build tools for this sitting only — never persisted, and
-    # never touches write_hermes_source/edit_hermes_source (those stay behind
-    # the operator's real self_build_enabled).
-    improve_cfg = Config({**cfg.data, "self_build_read_enabled": True})
+    # Full self-build toolset for this sitting only — a per-call config copy,
+    # never persisted to config.json. Every write inside it still goes through
+    # the normal ctx.confirm diff-and-backup gate and the PROTECTED denylist;
+    # this only decides which tools exist for the call, not whether writes
+    # need the operator's yes.
+    improve_cfg = Config({**cfg.data, "self_build_enabled": True})
 
     total = GO_MAX_RUN_SECONDS
     started = time.monotonic()
@@ -480,9 +487,9 @@ def cmd_improve(cfg, args: str) -> None:
 
     go_state.start_entry(project.name, os.getpid(), kind="improve")
     print(dim(f"— at the workbench in '{project.name}' — up to {mins} min. Its "
-              f"own source is open to read this sitting even if self_build_enabled "
-              f"is off; `persona` to reshape who's talking; `done` to get up. Try: "
-              f"\"how would you improve yourself?\" —"))
+              f"own source is open to read AND write this sitting; every write "
+              f"still needs your yes. `persona` to reshape who's talking; `done` "
+              f"to get up. Try: \"how would you improve yourself?\" —"))
     first = args.strip()
     exchanges = 0
     try:
@@ -1445,7 +1452,7 @@ HELP_MORE = f"""\
 {cyan('go')} stop [space|all]   {bold('killswitch')} — stop a detached run dead {dim('(alias: stop)')}
 {cyan('go')} status             list what's running
 {cyan('debate')} [text]         sit at the table and reason it out — no "act or finish" pressure, pure talk {dim('(alias: d)')}
-{cyan('improve')} [text]        same table, turned on itself — its own source is open to read this sitting {dim('(alias: i)')}
+{cyan('improve')} [text]        same table, turned on itself — reads, and can build on, its own source this sitting {dim('(alias: i)')}
 {cyan('session')} [text]        sit WITH it in the foreground the whole time instead {dim('(alias: s)')}
 {cyan('run')} <text>            one foreground exchange, then back to the prompt {dim('(alias: r)')}
 

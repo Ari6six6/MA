@@ -441,10 +441,11 @@ def test_improve_runs_an_exchange_and_ends_on_done(cfg, capsys, monkeypatch):
     assert "1 exchange" in out
 
 
-def test_improve_turns_off_nudges_injects_framing_and_opens_read_only_self_build(cfg, monkeypatch):
+def test_improve_turns_off_nudges_injects_framing_and_opens_self_build(cfg, monkeypatch):
     """`improve` reuses debate's no-pressure shape but swaps in its own framing,
-    and equips read-only self-build for the sitting via a per-call config copy
-    — without touching the operator's persisted self_build_enabled."""
+    and equips the FULL self-build toolset (read + write) for the sitting via
+    a per-call config copy — without touching the operator's persisted
+    self_build_enabled, which comes out exactly as it went in."""
     from hermes.llm import MockBackend
 
     cfg.set("backend", "mock")
@@ -469,9 +470,38 @@ def test_improve_turns_off_nudges_injects_framing_and_opens_read_only_self_build
     assert seen["stall_nudges"] == 0
     assert seen["phantom_nudges"] == 0
     assert seen["extra_system"] is cli.IMPROVE_FRAMING
-    assert seen["cfg"].get("self_build_read_enabled") is True
-    assert seen["cfg"].get("self_build_enabled") is False  # unchanged
-    assert cfg.get("self_build_read_enabled") is False  # the operator's real config, untouched
+    assert seen["cfg"].get("self_build_enabled") is True  # the per-call copy
+    assert cfg.get("self_build_enabled") is False  # the operator's real config, untouched
+
+
+def test_improve_cfg_copy_actually_equips_write_tools(cfg, monkeypatch):
+    """Not just a flag check: the config copy improve hands to agent.run must
+    make build_registry equip write_hermes_source/edit_hermes_source too —
+    the whole point is the agent can act on what it concludes, gated by the
+    normal confirm-and-diff pause on each individual write."""
+    from hermes.llm import MockBackend
+    from hermes.tools import build_registry
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")
+
+    seen = {}
+
+    def fake_run(project, prompt, run_cfg, backend, **kwargs):
+        seen["registry"] = build_registry(project, run_cfg, lambda *a, **k: True)
+
+        class _R:
+            run_id, turns, aborted = 1, 1, False
+        return _R()
+
+    monkeypatch.setattr(cli.agent, "run", fake_run)
+    cli.cmd_improve(cfg, "reason with me")
+
+    for name in ("list_hermes_source", "read_hermes_source",
+                 "write_hermes_source", "edit_hermes_source"):
+        assert name in seen["registry"].names()
 
 
 def test_improve_persona_command_edits_without_leaving_the_table(cfg, monkeypatch):

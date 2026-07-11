@@ -278,8 +278,7 @@ the harness it's running inside of, not `<project>/workspace`.
 
 | Flag | Default | Effect |
 |---|---|---|
-| `self_build_enabled` | `false` | register `list_hermes_source` / `read_hermes_source` (free, read-only) and `write_hermes_source` / `edit_hermes_source` (gated) |
-| `self_build_read_enabled` | `false` | lighter than the flag above: registers only `list_hermes_source` / `read_hermes_source` — no write surface. The `improve` command (see Command reference) sets this for its own sitting via a per-call config copy; it never touches `config.json`, and you can also set it standingly yourself if you just want read access always on |
+| `self_build_enabled` | `false` | register `list_hermes_source` / `read_hermes_source` (free, read-only) and `write_hermes_source` / `edit_hermes_source` (gated). Standing config, or set for one sitting by the `improve` command (see Command reference) via a per-call copy that never touches `config.json` |
 
 Reading and listing are free — the agent can browse its own code any time once
 the flag is on. Writing is gated like `forge_tool`: every write or edit pauses
@@ -407,12 +406,22 @@ improve                                    # opens the sitting, you lead
 improve how would you improve yourself?    # opens it with a question already asked
 ```
 
-For the length of the sitting, `list_hermes_source`/`read_hermes_source` are
-open regardless of your standing config — it can always browse and read its
-own code. `write_hermes_source`/`edit_hermes_source` are **not** part of that
-— they still need your real `self_build_enabled` on, same diff-and-y/n gate as
-any other self-edit. `improve` widens what the agent is invited to think
-about; it never widens what it's allowed to do unattended.
+For the length of the sitting, the **full** self-build toolset is open
+regardless of your standing config — `list_hermes_source`/`read_hermes_source`
+to browse and read its own code, and `write_hermes_source`/`edit_hermes_source`
+to actually change it, via a per-call config copy that never touches
+`config.json`. Every write still pauses for your explicit y/n with a real
+diff and keeps a backup before it lands — same gate as any other self-edit,
+same `PROTECTED` denylist refusing the files that define the gates
+themselves. `improve` isn't a bypass of that gate; it's the deliberate,
+session-scoped self-build session feature 9's docs already recommend,
+opened and closed automatically for exactly the sitting's duration instead of
+something you flip by hand.
+
+Its framing also points the agent at the RUN SUMMARIES and NOTES sections
+already in its context (banked by retrospection, feature 11) — so a sitting
+reasons from real accumulated evidence about its own past runs, not source
+code read cold.
 
 Use `persona`/`persona edit` mid-sitting to reshape who's at the table without
 leaving it, same as `debate`; `done`/`exit`/Ctrl-C ends it.
@@ -478,4 +487,4 @@ what it was before. Nothing here changes on-disk formats without silent migratio
 | `retrospect [now]` | show the recorded per-run metrics / force a self-review pass |
 | `debug prefix` | measure the byte prefix two consecutive packages share |
 | `allow [list]\|add <domain> [methods]\|rm <domain>` | manage the persistent `http_request` auto-approve list |
-| `improve [text]` (alias `i`) | same table as `debate`, turned on Hermes itself — its own source is open to read for the sitting even with `self_build_enabled` off; writes still need that flag on separately |
+| `improve [text]` (alias `i`) | same table as `debate`, turned on Hermes itself — its own source is open to read AND write for the sitting even with `self_build_enabled` off standingly; every write still pauses for your y/n with a diff |

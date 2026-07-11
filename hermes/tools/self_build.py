@@ -1,13 +1,14 @@
 """Self-build tools: let the agent read and edit Hermes' OWN source tree.
 
-Off by default (`self_build_enabled`), with a lighter `self_build_read_enabled`
-that equips just the read-only half (see READ_TOOLS/WRITE_TOOLS below) — what
-`improve` sessions turn on for the sitting so the agent can always look at its
-own code, without opening the write surface. This is a different, much
-narrower gate than the project file tools: those are scoped to `<project>/`, a
-directory the agent is expected to fill freely. This module is scoped to the
-Hermes installation itself (`hermes.paths.repo_root()`) — the code that
-defines every other gate in the system.
+Off by default (`self_build_enabled`) for a plain work run; the `improve`
+command (hermes/cli.py) turns this flag on for the duration of its own
+sitting via a per-call config copy that never touches the operator's
+persisted config.json — the standing flag stays exactly as the operator left
+it. This is a different, much narrower gate than the project file tools:
+those are scoped to `<project>/`, a directory the agent is expected to fill
+freely. This module is scoped to the Hermes installation itself
+(`hermes.paths.repo_root()`) — the code that defines every other gate in the
+system.
 
 That difference means one extra rule the project tools don't need: a fixed
 denylist (`PROTECTED`) of files this module refuses to write or edit no matter
@@ -239,10 +240,4 @@ def edit_hermes_source(args, ctx):
     return f"edited {_rel(path)}{note}. Restart Hermes for it to take effect; run the tests before you tell the operator it's safe."
 
 
-# Split so a caller can offer read-only access (list/read, both already free —
-# no confirm even when equipped) without the write surface. `improve` sessions
-# equip READ_TOOLS alone via `self_build_read_enabled`; `self_build_enabled`
-# still equips everything, unchanged.
-READ_TOOLS = [list_hermes_source, read_hermes_source]
-WRITE_TOOLS = [write_hermes_source, edit_hermes_source]
-TOOLS = READ_TOOLS + WRITE_TOOLS
+TOOLS = [list_hermes_source, read_hermes_source, write_hermes_source, edit_hermes_source]
