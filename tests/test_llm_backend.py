@@ -92,6 +92,7 @@ def test_housekeeping_backend_fails_fast_without_retry(monkeypatch):
 
     hk = OpenAIBackend.__new__(OpenAIBackend)  # bypass real client for the mock
     hk._httpx = httpx
+    hk._quiet = False
     hk.RETRY_DELAYS = ()
     hk.url = "http://127.0.0.1:8000/v1/chat/completions"
 
@@ -111,6 +112,45 @@ def test_housekeeping_backend_fails_fast_without_retry(monkeypatch):
 def test_mock_backend_housekeeping_returns_self():
     b = MockBackend()
     assert b.housekeeping() is b
+
+
+def test_housekeeping_quiet_flag_propagates():
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1"}.get(key, default)
+
+    base = OpenAIBackend(DictCfg())
+    assert base.housekeeping()._quiet is False           # foreground: proof-of-life stays
+    assert base.housekeeping(quiet=True)._quiet is True   # background: silent
+
+
+def test_quiet_backend_silences_the_heartbeat(monkeypatch):
+    # The background housekeeping thread blocks no one, so its "waiting on the
+    # model" heartbeat must not print into the operator's live prompt.
+    import hermes.llm as llm
+    from contextlib import contextmanager
+
+    seen = {}
+
+    @contextmanager
+    def fake_heartbeat(label, interval=15.0, printer=print):
+        seen["printer"] = printer
+        yield
+
+    monkeypatch.setattr(llm, "heartbeat", fake_heartbeat)
+
+    def handler(request):
+        return httpx.Response(200, json=_message(content="ok"))
+
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1"}.get(key, default)
+
+    for quiet, heartbeat_is_real_print in [(False, True), (True, False)]:
+        backend = OpenAIBackend(DictCfg(), quiet=quiet)
+        backend.client = httpx.Client(transport=httpx.MockTransport(handler))
+        backend.chat([{"role": "user", "content": "hi"}])
+        assert (seen["printer"] is print) is heartbeat_is_real_print
 
 
 def test_plain_text_response():

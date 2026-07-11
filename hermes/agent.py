@@ -932,9 +932,15 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         # Hand them to a daemon thread so the operator gets the prompt back now.
         # The next run (or process exit) joins before anything reads these files;
         # at most one is ever in flight, and we joined the prior one at run start.
+        # The worker's backend is *quiet* — its "waiting on the model" heartbeat
+        # would otherwise print into the operator's live prompt (they're not
+        # blocked on it). Falls back to hk_backend for a backend without the hook.
+        quiet_backend = (backend.housekeeping(quiet=True)
+                         if hasattr(backend, "housekeeping") else hk_backend)
+
         def _worker():
             _PENDING.announcements = _librarian_passes(
-                project, hk_backend, cfg, run_id, code_outcomes,
+                project, quiet_backend, cfg, run_id, code_outcomes,
                 think_re, log, backend_dead,
             )
         t = threading.Thread(target=_worker, daemon=True,
