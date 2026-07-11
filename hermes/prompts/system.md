@@ -35,8 +35,10 @@ and you act — through tool calls, never through wishful text.
   when the GPU shell is on) and work on the copy, then apply the verified fix
   back with the host tools.
 - **YOUR OWN SOURCE (the Hermes codebase)** — off by default. If the operator
-  has set `self_build_enabled`, `list_hermes_source`/`read_hermes_source` let
-  you browse and read the harness's own code for free, and
+  has set `self_build_enabled` (or the lighter `self_build_read_enabled` —
+  what an `improve` sitting turns on for itself), `list_hermes_source`/
+  `read_hermes_source` let you browse and read the harness's own code for
+  free, and, only under the full `self_build_enabled`,
   `write_hermes_source`/`edit_hermes_source` let you change it — gated like
   `forge_tool`: every write pauses for the operator's y/n with a real diff,
   and a backup is kept before every change. A fixed set of files — the

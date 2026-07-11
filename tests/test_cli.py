@@ -423,6 +423,89 @@ def test_debate_busy_guard(cfg, capsys, monkeypatch):
     go_state.clear_entry(project.name)
 
 
+def test_improve_runs_an_exchange_and_ends_on_done(cfg, capsys, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")
+
+    cli.cmd_improve(cfg, "how would you improve yourself?")
+
+    project = cli.Project.load(cli._projects_dir(cfg), cli.DEFAULT_SPACE)
+    assert (project.runs_dir / "0001").exists()
+    assert go_state.active_entry(cli.DEFAULT_SPACE) is None
+    out = capsys.readouterr().out
+    assert "left the workbench" in out
+    assert "1 exchange" in out
+
+
+def test_improve_turns_off_nudges_injects_framing_and_opens_read_only_self_build(cfg, monkeypatch):
+    """`improve` reuses debate's no-pressure shape but swaps in its own framing,
+    and equips read-only self-build for the sitting via a per-call config copy
+    — without touching the operator's persisted self_build_enabled."""
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    assert cfg.get("self_build_enabled") is False
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")
+
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs)
+        seen["cfg"] = args[2]  # agent.run(project, prompt, cfg, backend, ...)
+
+        class _R:  # noqa: D401 - minimal stand-in for RunResult
+            run_id, turns, aborted = 1, 1, False
+        return _R()
+
+    monkeypatch.setattr(cli.agent, "run", fake_run)
+    cli.cmd_improve(cfg, "reason with me")
+
+    assert seen["stall_nudges"] == 0
+    assert seen["phantom_nudges"] == 0
+    assert seen["extra_system"] is cli.IMPROVE_FRAMING
+    assert seen["cfg"].get("self_build_read_enabled") is True
+    assert seen["cfg"].get("self_build_enabled") is False  # unchanged
+    assert cfg.get("self_build_read_enabled") is False  # the operator's real config, untouched
+
+
+def test_improve_persona_command_edits_without_leaving_the_table(cfg, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    lines = iter(["persona", "done"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(lines))
+
+    edited = {"count": 0}
+    monkeypatch.setattr(cli, "_edit_file", lambda p: edited.__setitem__("count", edited["count"] + 1))
+    monkeypatch.setattr(cli.agent, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("persona must not be sent to the agent")))
+
+    cli.cmd_improve(cfg, "")
+
+    assert edited["count"] == 1
+
+
+def test_improve_busy_guard(cfg, capsys, monkeypatch):
+    project = cli._ensure_space(cfg)
+    go_state.start_entry(project.name, os.getpid(), kind="go")
+    monkeypatch.setattr(cli, "_prepare_run",
+                        lambda cfg: (_ for _ in ()).throw(
+                            AssertionError("must not prepare a run on a busy space")))
+
+    cli.cmd_improve(cfg, "hello")
+    assert "busy" in capsys.readouterr().out
+    go_state.clear_entry(project.name)
+
+
 def test_gpu_serve_prechecks_connectivity_before_gpu_detection(cfg, capsys, monkeypatch):
     """A dropped SSH link must report as 'box not reachable — re-attach', not as
     a confusing GPU-detection failure deep in provisioning."""

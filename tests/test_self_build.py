@@ -121,3 +121,14 @@ def test_registry_gates_on_self_build_enabled(project, cfg, yes):
     for name in ("list_hermes_source", "read_hermes_source",
                  "write_hermes_source", "edit_hermes_source"):
         assert name in registry2.names()
+
+
+def test_registry_read_enabled_equips_read_tools_only(project, cfg, yes):
+    """The lighter flag `improve` sets for its sitting must never open the
+    write surface on its own — only the real self_build_enabled does that."""
+    cfg.set("self_build_read_enabled", True)
+    registry = build_registry(project, cfg, yes)
+    assert "list_hermes_source" in registry.names()
+    assert "read_hermes_source" in registry.names()
+    assert "write_hermes_source" not in registry.names()
+    assert "edit_hermes_source" not in registry.names()

@@ -229,11 +229,19 @@ def build_registry(project, cfg, confirm_fn) -> ToolRegistry:
 
     # Self-build (feature 9): read/write the Hermes codebase itself, only
     # when the operator opts in. Gated far tighter than project file tools —
-    # see hermes/tools/self_build.py's PROTECTED denylist.
+    # see hermes/tools/self_build.py's PROTECTED denylist. A lighter
+    # self_build_read_enabled equips just the read-only half (list/read, both
+    # already free) without opening write/edit — what `improve` sessions turn
+    # on for the sitting, per-call, without touching the persisted flag.
     if cfg.get("self_build_enabled", False):
         from hermes.tools import self_build as self_build_tools
 
         for t in self_build_tools.TOOLS:
+            registry.register(t)
+    elif cfg.get("self_build_read_enabled", False):
+        from hermes.tools import self_build as self_build_tools
+
+        for t in self_build_tools.READ_TOOLS:
             registry.register(t)
 
     # Host tools only exist when the operator has registered a server —

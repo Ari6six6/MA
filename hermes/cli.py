@@ -414,6 +414,114 @@ def cmd_debate(cfg, args: str) -> None:
     print(dim(f"— left the table — {exchanges} exchange(s) —"))
 
 
+# The improve contract: injected as this run's system framing. Reuses debate's
+# plumbing (same sitting, same act-or-finish pressure off) but the subject is
+# Hermes itself, not the operator's project, so the agent needs to be told
+# explicitly what's in scope and what still needs a human's yes.
+IMPROVE_FRAMING = """\
+You are at the workbench with the operator, in a session about improving
+Hermes — the harness you are running inside of, not the operator's project.
+This is deliberate practice, not idle chat. list_hermes_source and
+read_hermes_source are open for this sitting, regardless of the operator's
+usual settings, so read your own code, and read docs/DECISIONS.md and
+docs/ARCHITECTURE_NOTES.md for why it's built the way it is. Use your web
+tools to see what has actually changed in the field since you were last
+updated, and compare that honestly to what you do today. Form real opinions —
+where you are weakest, what you would build next, a design choice you would
+make differently — and say them plainly, including disagreements with the
+operator or with Hermes' own prior decisions. If you land on a concrete
+change, write it up (a proposal, a diff, a note under docs/) rather than
+leaving it as a vague impression. write_hermes_source and edit_hermes_source
+only exist this sitting if the operator has the standing self_build_enabled
+flag on too; if they don't, say what you'd change and why, and let the
+operator decide whether to open that. You are not required to produce a
+deliverable this turn — thinking it through out loud, honestly, is valid
+work."""
+
+
+def cmd_improve(cfg, args: str) -> None:
+    """A workbench, not a task: sit with the agent and reason about Hermes
+    itself — its own source, what's changed in the field since it was last
+    updated, what it would build next. Same shape as `debate` (same sitting
+    length, same live back-and-forth, same act-or-finish pressure off), but
+    the framing and the toolset differ: list_hermes_source/read_hermes_source
+    are open for this sitting even when self_build_enabled is off, set via a
+    per-call config copy that never touches the persisted flag, so the agent
+    can always look at its own code. write_hermes_source/edit_hermes_source
+    still need the real self_build_enabled on — this command never opens
+    those on its own. `persona`/`persona edit` reshapes who it is without
+    leaving the table; `done`/`exit` (or Ctrl-C at the prompt) ends it."""
+    project = _ensure_space(cfg)
+    busy = go_state.active_entry(project.name)
+    if busy:
+        print(yellow(f"'{project.name}' is busy") + dim(
+            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
+        return
+    prepared = _prepare_run(cfg)
+    if prepared is None:
+        return
+    gpu, sandbox, env, backend = prepared
+
+    # Read-only self-build tools for this sitting only — never persisted, and
+    # never touches write_hermes_source/edit_hermes_source (those stay behind
+    # the operator's real self_build_enabled).
+    improve_cfg = Config({**cfg.data, "self_build_read_enabled": True})
+
+    total = GO_MAX_RUN_SECONDS
+    started = time.monotonic()
+    mins = total // 60
+
+    def ask_stdin(_question: str) -> str:
+        try:
+            return input(magenta("  reply> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ""
+
+    go_state.start_entry(project.name, os.getpid(), kind="improve")
+    print(dim(f"— at the workbench in '{project.name}' — up to {mins} min. Its "
+              f"own source is open to read this sitting even if self_build_enabled "
+              f"is off; `persona` to reshape who's talking; `done` to get up. Try: "
+              f"\"how would you improve yourself?\" —"))
+    first = args.strip()
+    exchanges = 0
+    try:
+        while True:
+            remaining = total - (time.monotonic() - started)
+            if remaining <= 5:
+                print(dim(f"— the {mins} minutes are up — leaving the workbench —"))
+                break
+            if first:
+                msg, first = first, ""
+            else:
+                try:
+                    msg = input(magenta("you> ")).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+            low = msg.lower()
+            if low in ("done", "exit", "quit", "bye"):
+                break
+            if low in ("persona", "persona edit"):
+                _edit_file(persona_path())  # reshape who's at the table, mid-sitting
+                continue
+            if not msg:
+                continue
+            exchanges += 1
+            agent.run(
+                project, msg, improve_cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
+                max_run_seconds=int(remaining),
+                ask_operator_fn=ask_stdin,
+                stall_nudges=0, phantom_nudges=0, extra_system=IMPROVE_FRAMING,
+                on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+            )
+            left = int(max(0, total - (time.monotonic() - started)) // 60)
+            print(dim(f"— your turn — ~{left} min left at the workbench (`done` to end) —"))
+    finally:
+        go_state.clear_entry(project.name)
+    print(dim(f"— left the workbench — {exchanges} exchange(s) —"))
+
+
 def cmd_go(cfg, args: str) -> None:
     """The one verb for a space: say something. Nothing running yet? It
     starts, and you watch it live. Something already running? What you typed
@@ -1337,6 +1445,7 @@ HELP_MORE = f"""\
 {cyan('go')} stop [space|all]   {bold('killswitch')} — stop a detached run dead {dim('(alias: stop)')}
 {cyan('go')} status             list what's running
 {cyan('debate')} [text]         sit at the table and reason it out — no "act or finish" pressure, pure talk {dim('(alias: d)')}
+{cyan('improve')} [text]        same table, turned on itself — its own source is open to read this sitting {dim('(alias: i)')}
 {cyan('session')} [text]        sit WITH it in the foreground the whole time instead {dim('(alias: s)')}
 {cyan('run')} <text>            one foreground exchange, then back to the prompt {dim('(alias: r)')}
 
@@ -1363,13 +1472,15 @@ def dispatch(cfg, line: str) -> bool:
         return True
     cmd, _, rest = line.partition(" ")
     cmd = {"r": "run", "p": "project", "g": "gpu", "s": "session",
-           "d": "debate", "exit": "quit", "q": "quit"}.get(cmd, cmd)
+           "d": "debate", "i": "improve", "exit": "quit", "q": "quit"}.get(cmd, cmd)
     if cmd == "quit":
         return False
     elif cmd == "help":
         print(HELP_MORE if rest.strip() in ("more", "all", "full") else HELP)
     elif cmd == "debate":
         cmd_debate(cfg, rest)
+    elif cmd == "improve":
+        cmd_improve(cfg, rest)
     elif cmd == "session":
         cmd_session(cfg, rest)
     elif cmd == "go":

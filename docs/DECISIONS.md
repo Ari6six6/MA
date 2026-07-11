@@ -350,6 +350,54 @@ and the alternative I passed on. Newest at the bottom of each feature.
   exhausted) — losing a reflection is never a correctness problem for the run
   that hosted it, so it can never bounce or block a finish.
 
+## Feature 12 — `improve`: a front door onto self-build
+
+- **The gap this closes.** Self-build (feature 9) gives the agent the *tools*
+  to change its own source, but `self_build_enabled` defaults off and stays
+  off in practice — there was no occasion inside normal work for the agent to
+  even look at its own code, let alone reason about changing it. A flag
+  nobody ever has a reason to flip is off forever in effect, not just in
+  default. `improve` is the occasion: a named sitting whose whole subject is
+  Hermes itself, so self-improvement is something the agent is invited to do
+  rather than a switch waiting to be discovered.
+- **Built on `debate`'s plumbing, not a new run mode.** Same 42-minute
+  sitting, same live back-and-forth, same `stall_nudges=0`/`phantom_nudges=0`
+  so a turn that's pure reflection is accepted instead of bounced with "act or
+  finish." The only things that differ from `debate` are the system framing
+  (`IMPROVE_FRAMING` vs. `DEBATE_FRAMING`) and the toolset for the sitting.
+  Reusing the mechanism rather than inventing a second one means every safety
+  property `debate` already has — no unattended run, no channel for it to
+  happen without an operator at the keyboard — comes along for free.
+- **Read access is unconditional for the sitting; write access is not.** A new
+  `self_build_read_enabled` flag (separate from `self_build_enabled`) equips
+  `list_hermes_source`/`read_hermes_source` — both already free, read-only,
+  no confirm even when the full flag is on — via a per-call `Config` copy
+  built inside `cmd_improve` and handed to that call's `agent.run` only; it is
+  never written to `config.json`. `write_hermes_source`/`edit_hermes_source`
+  are deliberately NOT part of that copy: they stay behind the real,
+  operator-set `self_build_enabled`, same as any other time. The agent can
+  always look at itself; it can only ever change itself when the operator has
+  separately, standingly, opted into that — `improve` widens what it's
+  invited to *think about*, not what it's allowed to *do*.
+  `hermes/tools/self_build.py` now exports `READ_TOOLS`/`WRITE_TOOLS` as a
+  split of `TOOLS` so `build_registry` can equip the read half alone; the
+  `PROTECTED` denylist and the confirm-and-diff-and-backup path for writes are
+  untouched.
+- **Distinct from retrospection (feature 11), not a replacement for it.**
+  Retrospection is scoped to the agent's own assets *inside a project*
+  (notes, skills) and runs from harness-recorded metrics without a human in
+  the loop. `improve` is scoped to Hermes' own source tree, is always a live
+  sitting with the operator present, and its output is either conversation or
+  a human-confirmed diff — never an unattended write. "Recursive
+  self-improvement" in this codebase now names two different blast radii on
+  purpose: one that changes what the agent remembers, one that (with explicit
+  consent, one diff at a time) changes what the agent *is*.
+- **No auto-apply, no new endgame promised.** Everything feature 9 already
+  decided about self-edits — visible diff, explicit y/n, PROTECTED denylist,
+  restart required to take effect, no session that grades or applies its own
+  homework — is untouched here. `improve` is a front door, not a bypass; the
+  operator is still the one who reads the diff and says yes.
+
 ## Capabilities (breadth session)
 
 Toolbox tools paired with a seed skill, one capability per commit. These are

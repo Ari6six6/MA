@@ -279,6 +279,7 @@ the harness it's running inside of, not `<project>/workspace`.
 | Flag | Default | Effect |
 |---|---|---|
 | `self_build_enabled` | `false` | register `list_hermes_source` / `read_hermes_source` (free, read-only) and `write_hermes_source` / `edit_hermes_source` (gated) |
+| `self_build_read_enabled` | `false` | lighter than the flag above: registers only `list_hermes_source` / `read_hermes_source` — no write surface. The `improve` command (see Command reference) sets this for its own sitting via a per-call config copy; it never touches `config.json`, and you can also set it standingly yourself if you just want read access always on |
 
 Reading and listing are free — the agent can browse its own code any time once
 the flag is on. Writing is gated like `forge_tool`: every write or edit pauses
@@ -354,7 +355,7 @@ doesn't get cut off mid-task, set `max_run_seconds` (and, if delegation is on,
 meaning much once turns are cheap and the model is fast; time is what's
 actually metered on the box you're renting.
 
-### Feature 9 — Retrospection (cross-run self-improvement)
+### Feature 11 — Retrospection (cross-run self-improvement)
 
 The skills nudge reflects on one run while it's still in context. Retrospection
 is the layer above it: every N runs, a fresh-context side-pass reads the last
@@ -391,6 +392,35 @@ turns every Nth run. `retrospect` in the REPL shows the recorded metrics;
 `skills_enabled`/`skills_nudge` — notes catch the facts, skills catch the
 procedures, and the metrics tell you (and it) whether runs are actually
 getting smoother.
+
+### Feature 12 — `improve`: a sitting about Hermes itself
+
+Feature 9 gives the agent tools to change its own source; on its own that flag
+just sits off, because nothing in ordinary work ever gives the agent a reason
+to look at itself. `improve` is that reason: the same table as `debate` (same
+sitting length, same live back-and-forth, no "act or finish" pressure), except
+the subject is Hermes — its own code, what's changed in the field since it was
+last updated, what it would build differently.
+
+```
+improve                                    # opens the sitting, you lead
+improve how would you improve yourself?    # opens it with a question already asked
+```
+
+For the length of the sitting, `list_hermes_source`/`read_hermes_source` are
+open regardless of your standing config — it can always browse and read its
+own code. `write_hermes_source`/`edit_hermes_source` are **not** part of that
+— they still need your real `self_build_enabled` on, same diff-and-y/n gate as
+any other self-edit. `improve` widens what the agent is invited to think
+about; it never widens what it's allowed to do unattended.
+
+Use `persona`/`persona edit` mid-sitting to reshape who's at the table without
+leaving it, same as `debate`; `done`/`exit`/Ctrl-C ends it.
+
+This is a different kind of self-improvement than Feature 11: retrospection
+is unattended and scoped to the agent's own project assets (notes, skills);
+`improve` is always a live sitting with you present, scoped to Hermes' own
+source tree, and its only path to an actual change is a diff you say yes to.
 
 ## Static package budget (measured, 60K box)
 
@@ -448,3 +478,4 @@ what it was before. Nothing here changes on-disk formats without silent migratio
 | `retrospect [now]` | show the recorded per-run metrics / force a self-review pass |
 | `debug prefix` | measure the byte prefix two consecutive packages share |
 | `allow [list]\|add <domain> [methods]\|rm <domain>` | manage the persistent `http_request` auto-approve list |
+| `improve [text]` (alias `i`) | same table as `debate`, turned on Hermes itself — its own source is open to read for the sitting even with `self_build_enabled` off; writes still need that flag on separately |
