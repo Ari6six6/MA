@@ -7,7 +7,7 @@ httpx's MockTransport, so no network or GPU is involved.
 import httpx
 import pytest
 
-from hermes.llm import LLMTransportError, OpenAIBackend
+from hermes.llm import LLMTransportError, MockBackend, OpenAIBackend
 
 
 def make_backend(handler, cfg=None, monkeypatch=None):
@@ -55,6 +55,62 @@ def test_llm_timeout_is_configurable():
 
     backend = OpenAIBackend(DictCfg())
     assert backend.client.timeout.read == 900.0
+
+
+def test_housekeeping_backend_has_short_timeout_and_no_retries():
+    # The librarian's side-passes must not inherit a real turn's long timeout
+    # or its retry ladder — a slow box should make them skip, not block the REPL
+    # for llm_timeout × 4 attempts (~an hour at llm_timeout=900).
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1",
+                    "llm_timeout": 900,
+                    "housekeeping_timeout": 90}.get(key, default)
+
+    hk = OpenAIBackend(DictCfg()).housekeeping()
+    assert hk.client.timeout.read == 90.0   # the tight cousin, not 900s
+    assert hk.RETRY_DELAYS == ()             # single attempt, no ladder
+
+
+def test_housekeeping_timeout_defaults_to_120():
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1"}.get(key, default)
+
+    hk = OpenAIBackend(DictCfg()).housekeeping()
+    assert hk.client.timeout.read == 120.0
+
+
+def test_housekeeping_backend_fails_fast_without_retry(monkeypatch):
+    slept = []
+    monkeypatch.setattr("hermes.llm.time.sleep", lambda s: slept.append(s))
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectError("box is slow")
+
+    hk = OpenAIBackend.__new__(OpenAIBackend)  # bypass real client for the mock
+    hk._httpx = httpx
+    hk.RETRY_DELAYS = ()
+    hk.url = "http://127.0.0.1:8000/v1/chat/completions"
+
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"model": "test-model", "sampling": {}}.get(key, default)
+
+    hk.cfg = DictCfg()
+    hk.client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(LLMTransportError):
+        hk.chat([{"role": "user", "content": "go"}])
+    assert calls["n"] == 1   # exactly one attempt — no retry storm
+    assert slept == []       # and no retry sleeps
+
+
+def test_mock_backend_housekeeping_returns_self():
+    b = MockBackend()
+    assert b.housekeeping() is b
 
 
 def test_plain_text_response():
