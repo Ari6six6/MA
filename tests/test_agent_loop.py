@@ -476,6 +476,14 @@ def test_think_blocks_stripped():
     assert agent.strip_think(None) == ""
 
 
+def test_narrate_blocks_stripped():
+    assert agent.strip_narrate("<narrate>a tale</narrate>answer") == "answer"
+    assert agent.strip_narrate(None) == ""
+    assert agent.extract_narrate(
+        "<narrate>first</narrate>mid<narrate>second</narrate>"
+    ) == ["first", "second"]
+
+
 def test_empty_finish_summary_falls_back_to_real_handoff(project, cfg):
     # finish_run with a whitespace-only summary used to slip past the
     # never-lose-the-handoff fallback (it guarded on `is None`, but the summary
@@ -525,6 +533,39 @@ def test_inner_voice_can_be_disabled(project, cfg):
         ],
     )
     assert not (project.runs_dir / "0001" / "thinking.jsonl").exists()
+
+
+def test_narrator_voice_printed_and_logged(project, cfg, capsys):
+    # <narrate> is the outer voice: shown to the operator (unlike <think>) but
+    # cut out of the dense reply and filed to its own page.
+    result = run_agent(
+        project, cfg,
+        [{"tool": "finish_run", "args": {"summary": "done"},
+          "say": "<narrate>a citizen stirs in the dome</narrate>the file is written"}],
+    )
+    out = capsys.readouterr().out
+    assert "a citizen stirs in the dome" in out
+    assert "<narrate>" not in result.final_text
+    assert result.final_text == "the file is written"
+    nj = project.runs_dir / "0001" / "narration.jsonl"
+    assert nj.exists()
+    assert "a citizen stirs in the dome" in nj.read_text()
+
+
+def test_narrator_can_be_disabled(project, cfg, capsys):
+    # Off: the aside is discarded, not just unlogged — and never leaks into the
+    # dense reply as a raw, unparsed tag.
+    cfg.set("narrator_enabled", False)
+    result = run_agent(
+        project, cfg,
+        [{"tool": "finish_run", "args": {"summary": "done"},
+          "say": "<narrate>quiet</narrate>the file is written"}],
+    )
+    out = capsys.readouterr().out
+    assert "quiet" not in out
+    assert "<narrate>" not in result.final_text
+    assert result.final_text == "the file is written"
+    assert not (project.runs_dir / "0001" / "narration.jsonl").exists()
 
 
 def test_on_run_started_callback_fires_with_run_id_and_dir(project, cfg):

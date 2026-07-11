@@ -171,6 +171,15 @@ DEFAULTS: dict = {
     "almanac_enabled": True,
     "almanac_max_turns": 6,  # tool-call budget for one pass (research + the write)
     "almanac_index_chars": 1200,  # budget for the almanac index in the system prompt
+    # The narrator voice (feature 15): the outer voice, the opposite number of
+    # inner_voice. The model may, at its own discretion via <narrate>...</narrate>,
+    # describe the scene in story prose for the operator watching — instead of
+    # only the dense technical reply — and the harness itself narrates village
+    # lifecycle events (a citizen's birth, its harvest) it already knows happened
+    # regardless of whether the model chooses to. Pure display + a write-only
+    # narration.jsonl page; never re-injected into context, so it cannot steer a
+    # run. On by default: it costs nothing when the model doesn't use it.
+    "narrator_enabled": True,
     "max_model_len": 0,  # 0 = pick automatically from detected VRAM
     "gpu_port": 8000,
     "local_port": 8000,

@@ -18,11 +18,16 @@ from hermes import package
 from hermes.llm import ChatResult, LLMTransportError
 from hermes.tools import build_registry
 from hermes.tools.base import ToolContext
-from hermes.ui import bold, cyan, dim, green, magenta, red, yellow
+from hermes.ui import blue, bold, cyan, dim, green, magenta, red, yellow
 
 THINK_RE = re.compile(r"<(?:seed:)?think>.*?</(?:seed:)?think>\s*", re.S)
 # Just the reasoning tags, for recovering the inner text (inner-voice log).
 _THINK_TAG_RE = re.compile(r"</?(?:seed:)?think(?:ing)?>\s*", re.S)
+# The narrator voice (feature 15): a Hermes-defined tag, not a model-native one
+# like <think>, so it needs no per-model variants — the system prompt teaches
+# the model to use it verbatim.
+NARRATE_RE = re.compile(r"<narrate>.*?</narrate>\s*", re.S)
+_NARRATE_TAG_RE = re.compile(r"</?narrate>\s*", re.S)
 VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL)", re.I)
 MAX_CONSECUTIVE_ERRORS = 3
 
@@ -151,6 +156,28 @@ def extract_think(text: str | None, pattern: "re.Pattern" = THINK_RE) -> list[st
     return out
 
 
+def strip_narrate(text: str | None) -> str:
+    if not text:
+        return ""
+    return NARRATE_RE.sub("", text).strip()
+
+
+def extract_narrate(text: str | None) -> list[str]:
+    """Return the narrator-voice segments inside <narrate>…</narrate> blocks, in
+    order — the outer voice, the opposite number of extract_think's inner one.
+    Unlike <think>, this text IS meant for the operator's screen: it is pulled
+    out of the visible reply so it can be printed in its own distinct style
+    instead of blending into the dense, technical reply text."""
+    if not text:
+        return []
+    out: list[str] = []
+    for m in NARRATE_RE.finditer(text):
+        inner = _NARRATE_TAG_RE.sub("", m.group(0)).strip()
+        if inner:
+            out.append(inner)
+    return out
+
+
 def _think_re(tags) -> "re.Pattern":
     """Build the reasoning-stripper for a model's own tags. Hermes emits
     <think>/<seed:think>; Qwen uses <think>; some finetunes add <thinking>."""
@@ -274,6 +301,19 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
 
     def think_log(entry: dict):
         with thinking.open("a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    # The narrator voice (feature 15): the outer voice, the opposite number of
+    # inner_voice above. <think> is private reasoning, stripped and never shown;
+    # <narrate> is the model choosing, at its own discretion, to describe the
+    # scene in story prose for the operator watching — the village, its
+    # citizens, the work — instead of only the dense technical reply. Filed to
+    # its own page for the same reason thinking.jsonl exists: nothing is lost.
+    narrator_enabled = cfg.get("narrator_enabled", True)
+    narration = run_dir / "narration.jsonl"
+
+    def narrate_log(entry: dict):
+        with narration.open("a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     # Record EVERY y/n gate decision into the transcript, not just the screen:
@@ -468,6 +508,12 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     think_log({"turn": turns, "role": "assistant", "content": seg})
                     if show_thinking:
                         out(dim("  ") + magenta("[inner voice] ") + dim(seg))
+            if narrator_enabled:
+                for seg in extract_narrate(shown):
+                    narrate_log({"turn": turns, "role": "assistant", "content": seg})
+                    out("")
+                    out(blue("  ✦ ") + blue(seg))
+            shown = strip_narrate(shown)
             log(
                 {
                     "role": "assistant",

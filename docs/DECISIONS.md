@@ -621,6 +621,60 @@ for research capability too: "he can go to the Internet."
   operator's informed consent even under an explicit "turn it on" — reversible
   with `config almanac_enabled false`.
 
+## Feature 15 — The narrator voice
+
+Origin: the operator, watching a live run with the village turned on, pointed
+out a real gap — nothing in the logs ever said a citizen existed. The village
+and the librarian are both fully wired (network, DNA, harvest; the catalog
+card pass), but their signal to an operator watching the screen was either
+silent (birth/harvest only ever printed a terse one-line `[village] citizen
+X born`) or indistinguishable from ordinary tool-call noise. The ask: an
+"outer voice" — the opposite number of the inner voice — that tells the tale
+of what's happening, in prose, sparingly, not on every tool call.
+
+- **A Hermes-owned tag, not a model-native one.** `<think>` works because
+  models are natively trained to emit it; `<narrate>` is not — nothing about
+  it is native to any served model, so the system/subagent prompts teach it
+  explicitly, the same way the toolbox catalog teaches tool names. It needs no
+  per-model variant table (unlike `THINK_RE`'s `<think>`/`<seed:think>`
+  handling), because Hermes itself defines what the tag looks like.
+- **Always stripped, conditionally shown — mirrors `<think>`'s split exactly.**
+  `strip_narrate` runs unconditionally on the visible reply, so a `<narrate>`
+  tag never leaks into the dense answer even with `narrator_enabled` off (the
+  model was taught the tag; the harness must still make good on "cut out
+  before the operator reads the technical answer" regardless of the flag).
+  Only the *printing and logging* — the part that costs the operator's
+  attention — is gated by the flag. Same shape as `inner_voice`/`show_thinking`,
+  inverted: inner voice is captured but never shown; the narrator voice is
+  shown but never fed back into context (so it can't steer a run, and can't be
+  used to smuggle instructions to a future turn either).
+- **Two sources, not one.** The model's own `<narrate>` text is opt-in *within*
+  a run (its discretion, "whenever he sees fit"), but the harness also
+  narrates the two hard village lifecycle events — a citizen's birth, its
+  harvest — unconditionally whenever they happen, in the same voice, gated
+  only by `narrator_enabled`. This directly closes the gap that motivated the
+  feature: an operator who never gets a model-authored `<narrate>` aside this
+  run still sees, in the same style, that a citizen was born and its watch
+  ended — the harness narrates what it already knows happened, it doesn't wait
+  on the model to mention it.
+- **A dedicated color, not a reuse of `red`.** `red` already means "something
+  failed" in this palette (verification FAILED, an abort, an uncaught
+  exception). Painting flavor text the same color as an error would make the
+  two visually indistinguishable at a glance, defeating the point of a
+  distinct voice. Added `blue` to `hermes/ui.py` instead of overloading an
+  existing meaning.
+- **Filed to `narration.jsonl`, mirroring `thinking.jsonl`.** "Where there was
+  data, there will be data" applies here too, even though — unlike the inner
+  voice — this text was never hidden from the operator's screen in the first
+  place. The dedicated page is for retrieval after the fact (a run replayed
+  later, or scripted into audio) without grepping the full transcript.
+- **On by default (`narrator_enabled`) — the fourth exception to the house
+  rule.** Same shape as Features 13 and 14: the operator's real-time, explicit
+  ask, not a flag left to discover. It costs nothing when the model doesn't
+  use `<narrate>` (a regex pass over already-generated text) and the village
+  lifecycle lines are one `print` each — reversible with
+  `config narrator_enabled false`.
+
 ## Inner voice + waking the memory loop (Genesis session)
 
 - **Inner voice (`inner_voice`, on).** The model's `<think>` reasoning was already

@@ -23,7 +23,7 @@ from hermes import package
 from hermes.llm import LLMTransportError
 from hermes.tools import ToolRegistry
 from hermes.tools.base import ToolContext
-from hermes.ui import cyan, dim, magenta
+from hermes.ui import blue, cyan, dim, magenta
 
 
 def _child_registry(parent_ctx, allowed_tools, depth, max_depth, cfg):
@@ -83,7 +83,9 @@ def run_child(parent_ctx: ToolContext, brief: str, allowed_tools, cfg,
     body — its own citizen container on the dome — and is harvested to the file
     system when it returns (in a `finally`, so even an errored body leaves a
     record). Otherwise it runs in-process exactly as before."""
-    from hermes.agent import _assistant_msg, extract_think, strip_think
+    from hermes.agent import (
+        _assistant_msg, extract_narrate, extract_think, strip_narrate, strip_think,
+    )
 
     backend = parent_ctx.backend
     if backend is None:
@@ -147,6 +149,12 @@ def run_child(parent_ctx: ToolContext, brief: str, allowed_tools, cfg,
                 for seg in extract_think(result.content, think_re or None):
                     think_lines.append(json.dumps(
                         {"role": "child", "content": seg}, ensure_ascii=False))
+            if cfg.get("narrator_enabled", True):
+                for seg in extract_narrate(shown):
+                    if log:
+                        log({"role": "narrate", "content": seg})
+                    print(blue("  ✦ ") + blue(seg))
+            shown = strip_narrate(shown)
             if shown:
                 last_text = shown
                 print(magenta("  [child] ") + dim(shown.splitlines()[0][:120]))
@@ -182,6 +190,10 @@ def run_child(parent_ctx: ToolContext, brief: str, allowed_tools, cfg,
                 village.harvest(parent_ctx.sandbox, parent_ctx.project, body,
                                 runtime, report=conclusion or last_text,
                                 thinking="\n".join(think_lines))
+                if cfg.get("narrator_enabled", True):
+                    print(blue(f"    ✦ {body}'s watch ends — its body is carried up "
+                               "the mountain, logs and voice kept whole, before the "
+                               "dome reclaims the container."))
             except Exception as e:  # harvest must never mask the real result
                 print(dim(f"    [village] harvest of {body} failed: {e}"))
 
@@ -231,4 +243,9 @@ def _maybe_embody(parent_ctx, child_ctx, cfg, brief, role, depth, log):
         log({"role": "village", "content": f"born {name} (parent={parent_name}, "
              f"gen={depth})"})
     print(magenta(f"    [village] ") + dim(f"citizen {name} born"))
+    if cfg.get("narrator_enabled", True):
+        kin = (f"{len(siblings)} sibling(s) already pace the dome" if siblings
+               else "first of its generation, alone on the dome")
+        print(blue(f"    ✦ {name} draws its first breath, sent by {parent_name} "
+                   f"to {role or 'work'} — {kin}."))
     return name, runtime, siblings
