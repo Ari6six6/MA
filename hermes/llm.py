@@ -40,17 +40,35 @@ class LLMTransportError(Exception):
 class OpenAIBackend:
     RETRY_DELAYS = (1, 3, 8)
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, *, timeout=None, retry_delays=None):
         import httpx
 
         self._httpx = httpx
         self.cfg = cfg
+        # retry_delays lets a bounded sibling (see .housekeeping()) turn off the
+        # retry ladder entirely; None = the class default for real turns.
+        if retry_delays is not None:
+            self.RETRY_DELAYS = tuple(retry_delays)
         base_url = (cfg.get("base_url") or "").rstrip("/")
         self.url = f"{base_url}/chat/completions"
+        eff_timeout = timeout if timeout is not None else cfg.get("llm_timeout", 300)
         self.client = httpx.Client(
             headers={"Authorization": f"Bearer {cfg.get('api_key', 'hermes')}"},
-            timeout=float(cfg.get("llm_timeout", 300) or 300),
+            timeout=float(eff_timeout or 300),
         )
+
+    def housekeeping(self):
+        """A bounded sibling for the librarian's side-passes — catalog
+        enrichment, the almanac, retrospection, directive reconciliation, the
+        skills nudge. Those run between the operator and their next prompt and
+        are explicitly conveniences; they must NOT inherit a real turn's long
+        `llm_timeout` or its retry ladder. Left to, a single slow completion
+        on a loaded box blocks the REPL for the better part of an hour
+        (llm_timeout × 4 attempts). Short timeout, single attempt: on a slow
+        box the pass raises LLMTransportError, its caller no-ops, and the run's
+        result — already fixed by the time these fire — simply stands."""
+        t = self.cfg.get("housekeeping_timeout", 120) or 120
+        return OpenAIBackend(self.cfg, timeout=float(t), retry_delays=())
 
     def chat(self, messages, tools=None, tool_choice=None) -> ChatResult:
         sampling = self.cfg.get("sampling", {})
@@ -138,6 +156,10 @@ class MockBackend:
     def __init__(self, script: list | None = None):
         self.script = list(script or [])
         self._counter = 0
+
+    def housekeeping(self):
+        # Nothing to bound in-process; the side-passes reuse this same script.
+        return self
 
     def _tc(self, name: str, args: dict) -> ToolCall:
         self._counter += 1

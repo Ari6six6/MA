@@ -330,12 +330,20 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         log({"role": "gate", "action": action, "approved": approved, "auto": _auto_gate})
         return approved
 
+    # A bounded backend for the librarian's side-passes (reconcile, retrospect,
+    # catalog, almanac, skills nudge). They run in the operator's foreground and
+    # are conveniences — this caps each at housekeeping_timeout with no retries,
+    # so a slow box makes them skip instead of blocking the prompt for ~an hour.
+    # getattr fallback: a backend without the method (a test double, a future
+    # backend) simply runs the passes on itself, exactly as before.
+    hk_backend = backend.housekeeping() if hasattr(backend, "housekeeping") else backend
+
     # Directive reconciliation (feature 1): before assembling, refresh the
     # distilled directives.md when it's due (migration on an old project's first
     # run, or every N runs). Off by default; a failed pass never blocks the run.
     if cfg.get("directives_enabled", False):
         from hermes import directives as directives_mod
-        if directives_mod.maybe_reconcile(project, backend, cfg, run_id, think_re):
+        if directives_mod.maybe_reconcile(project, hk_backend, cfg, run_id, think_re):
             out(magenta("  (reconciled standing instructions → directives.md)"))
             log({"role": "directives", "content": project.read_directives()})
 
@@ -772,7 +780,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         )
         if figured_out:
             _skills_nudge(
-                backend, messages, registry, ctx, log,
+                hk_backend, messages, registry, ctx, log,
                 cfg.get("skills_nudge_max_turns", 3), think_re, narrate=out,
             )
 
@@ -810,7 +818,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     if cfg.get("retrospect_enabled", False) and not backend_dead:
         from hermes import retrospect as retrospect_mod
         if retrospect_mod.maybe_retrospect(
-            project, backend, cfg, run_id, think_re=think_re, log=log,
+            project, hk_backend, cfg, run_id, think_re=think_re, log=log,
         ):
             out(magenta("  (retrospection — banked lessons from recent runs)"))
 
@@ -820,7 +828,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     # dead. A failed pass is a no-op — the run's result above stands.
     if cfg.get("catalog_enabled", True):
         from hermes import catalog as catalog_mod
-        cat_backend = None if backend_dead else backend
+        cat_backend = None if backend_dead else hk_backend
         try:
             # log=None on purpose: enrichment samples raw file content to
             # describe it, and that must NOT flow into the agent's own run
@@ -843,7 +851,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         from hermes import catalog as catalog_mod
         try:
             if catalog_mod.maybe_reflect_outcomes(
-                project, backend, cfg, code_outcomes, think_re=think_re, log=log,
+                project, hk_backend, cfg, code_outcomes, think_re=think_re, log=log,
             ):
                 out(magenta("  (librarian — banked a hypothesis to the almanac)"))
         except Exception:

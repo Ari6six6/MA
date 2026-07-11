@@ -190,6 +190,16 @@ DEFAULTS: dict = {
     # 300s; raise this instead of watching a real-but-slow completion get cut off
     # and redone from scratch every retry.
     "llm_timeout": 300,
+    # The tighter cousin of llm_timeout, for the librarian's side-passes only
+    # (catalog enrichment, the almanac, retrospection, directive reconciliation,
+    # the skills nudge). Those run in the operator's foreground between one run
+    # and the next and are pure conveniences — so they get a short, SINGLE-shot
+    # call (no retry ladder). On a slow/overloaded box the pass is skipped and
+    # the finished run's result stands, instead of a housekeeping call inheriting
+    # the 900s-and-retry budget and blocking the prompt for the better part of an
+    # hour. Keep this well below llm_timeout; raise only if a genuinely useful
+    # pass is being cut off on a healthy-but-slow box.
+    "housekeeping_timeout": 120,
     "max_model_len": 0,  # 0 = pick automatically from detected VRAM
     "gpu_port": 8000,
     "local_port": 8000,
