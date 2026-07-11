@@ -18,7 +18,7 @@ from hermes import package
 from hermes.llm import ChatResult, LLMTransportError
 from hermes.tools import build_registry
 from hermes.tools.base import ToolContext
-from hermes.ui import blue, bold, cyan, dim, green, magenta, red, yellow
+from hermes.ui import bold, cyan, dim, green, magenta, red, yellow
 
 THINK_RE = re.compile(r"<(?:seed:)?think>.*?</(?:seed:)?think>\s*", re.S)
 # Just the reasoning tags, for recovering the inner text (inner-voice log).
@@ -524,7 +524,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                 for seg in extract_narrate(shown):
                     narrate_log({"turn": turns, "role": "assistant", "content": seg})
                     out("")
-                    out(blue("  ✦ ") + blue(seg))
+                    out(red("  ✦ ") + red(seg))
             shown = strip_narrate(shown)
             log(
                 {

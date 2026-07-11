@@ -23,7 +23,7 @@ from hermes import package
 from hermes.llm import LLMTransportError
 from hermes.tools import ToolRegistry
 from hermes.tools.base import ToolContext
-from hermes.ui import blue, cyan, dim, magenta
+from hermes.ui import cyan, dim, magenta, red
 
 
 def _child_registry(parent_ctx, allowed_tools, depth, max_depth, cfg):
@@ -153,7 +153,7 @@ def run_child(parent_ctx: ToolContext, brief: str, allowed_tools, cfg,
                 for seg in extract_narrate(shown):
                     if log:
                         log({"role": "narrate", "content": seg})
-                    print(blue("  ✦ ") + blue(seg))
+                    print(red("  ✦ ") + red(seg))
             shown = strip_narrate(shown)
             if shown:
                 last_text = shown
@@ -191,7 +191,7 @@ def run_child(parent_ctx: ToolContext, brief: str, allowed_tools, cfg,
                                 runtime, report=conclusion or last_text,
                                 thinking="\n".join(think_lines))
                 if cfg.get("narrator_enabled", True):
-                    print(blue(f"    ✦ {body}'s watch ends — its body is carried up "
+                    print(red(f"    ✦ {body}'s watch ends — its body is carried up "
                                "the mountain, logs and voice kept whole, before the "
                                "dome reclaims the container."))
             except Exception as e:  # harvest must never mask the real result
@@ -246,6 +246,6 @@ def _maybe_embody(parent_ctx, child_ctx, cfg, brief, role, depth, log):
     if cfg.get("narrator_enabled", True):
         kin = (f"{len(siblings)} sibling(s) already pace the dome" if siblings
                else "first of its generation, alone on the dome")
-        print(blue(f"    ✦ {name} draws its first breath, sent by {parent_name} "
+        print(red(f"    ✦ {name} draws its first breath, sent by {parent_name} "
                    f"to {role or 'work'} — {kin}."))
     return name, runtime, siblings

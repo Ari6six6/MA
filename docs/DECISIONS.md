@@ -657,12 +657,24 @@ of what's happening, in prose, sparingly, not on every tool call.
   run still sees, in the same style, that a citizen was born and its watch
   ended — the harness narrates what it already knows happened, it doesn't wait
   on the model to mention it.
-- **A dedicated color, not a reuse of `red`.** `red` already means "something
-  failed" in this palette (verification FAILED, an abort, an uncaught
-  exception). Painting flavor text the same color as an error would make the
-  two visually indistinguishable at a glance, defeating the point of a
-  distinct voice. Added `blue` to `hermes/ui.py` instead of overloading an
-  existing meaning.
+- **Red, per the operator's explicit ask — twice.** The first draft used a new
+  `blue` instead, on the grounds that `red` already means "something failed" in
+  this palette (verification FAILED, an abort, an uncaught exception) and
+  overloading it would make flavor text and error text visually indistinguishable
+  at a glance. The operator asked for "red inked narration" in the original
+  request and again after the first version shipped in blue — a real, repeated
+  preference outranks a not-yet-observed readability worry. Reverted to `red`
+  and removed the unused `blue` entry from `hermes/ui.py`. If the error/flavor
+  overlap turns out to bite in practice, the fix is a prefix (`[!]` vs `✦`), not
+  a color swap back.
+- **`DEBATE_FRAMING`/`IMPROVE_FRAMING` now say the narrator voice is still
+  available.** Both are appended to the system prompt via `extra_system`
+  *after* `system.md`'s own narrator-voice section, and both frame the sitting
+  as "reason out loud in plain language" — close enough to "use `<narrate>`
+  sparingly" that the model was reliably reading it as a demotion of the
+  outer voice rather than a mode where it's simply less likely to be used. Made
+  it explicit in the framing text instead of leaving it to be inferred against
+  a competing instruction.
 - **Filed to `narration.jsonl`, mirroring `thinking.jsonl`.** "Where there was
   data, there will be data" applies here too, even though — unlike the inner
   voice — this text was never hidden from the operator's screen in the first
