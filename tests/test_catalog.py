@@ -205,6 +205,41 @@ def test_agent_run_catalogues_written_files(project, cfg):
     assert cards["out.py"]["kind"] == "script"
 
 
+def test_catalog_reaches_the_reflection_pass(project, cfg):
+    """#2: the retrospection pass sees the artifact catalog, so it can catch
+    problems that live in the files (duplicates) rather than the metrics."""
+    from hermes import retrospect
+
+    # two measured runs so the pass doesn't bail
+    for rid in (1, 2):
+        run_dir = project.runs_dir / f"{rid:04d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "metrics.json").write_text(json.dumps({
+            "run": rid, "turns": 3, "aborted": False, "tool_calls": 1,
+            "tool_errors": 0, "stall_nudges": 0, "phantom_bounces": 0,
+            "verify_bounces": 0, "verify_failures": 0, "tainted_turns": 0,
+            "tools": ["write_file"],
+        }))
+        (run_dir / "summary.md").write_text("Did: things\n")
+
+    write_ws(project, "scraper.py", "same body")
+    write_ws(project, "scraper_v2.py", "same body")  # a re-derivation
+    catalog.index(project, None, cfg, run_id=2)
+
+    seen = {}
+
+    class Capture:
+        def chat(self, messages, tools=None, tool_choice=None):
+            seen["prompt"] = messages[0]["content"]
+            from hermes.llm import ChatResult
+            return ChatResult(content="nothing worth changing")
+
+    retrospect.retrospect(project, Capture(), cfg)
+    assert "WORKSPACE CATALOG" in seen["prompt"]
+    assert "scraper.py" in seen["prompt"]
+    assert "same content" in seen["prompt"]  # the duplicate flag surfaced
+
+
 def test_catalog_off_by_config_writes_nothing(project, cfg):
     cfg.set("catalog_enabled", False)
     backend = MockBackend([

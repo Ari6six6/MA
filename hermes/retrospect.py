@@ -70,12 +70,22 @@ def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
         f"## Run {rid:04d}\n{text}"
         for rid, text in project.recent_summaries(window)
     )
+    # The catalog is the artifact-level view: it lets reflection see problems
+    # that live in the files (duplicated/re-derived scripts, purposeless sprawl)
+    # rather than in the run metrics. Empty/off -> a harmless "(none)".
+    catalog_view = ""
+    if cfg.get("catalog_enabled", True):
+        from hermes import catalog as catalog_mod
+        catalog_view = catalog_mod.digest(
+            project, int(cfg.get("catalog_digest_chars", 2000))
+        )
     prompt = package.render(package.retrospect_prompt(), {
         "metrics": metrics_block(project, window),
         "summaries": summaries or "(none)",
         "skills_index": skills_mod.index(project) or "(none)",
         "notes": package.truncate_keep_tail(project.read_notes().strip(), 2000)
         or "(none)",
+        "catalog": catalog_view or "(none)",
     })
     registry = build_registry(cfg)
     # An unattended reflection pass must never approve anything on the
