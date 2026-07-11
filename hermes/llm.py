@@ -49,7 +49,7 @@ class OpenAIBackend:
         self.url = f"{base_url}/chat/completions"
         self.client = httpx.Client(
             headers={"Authorization": f"Bearer {cfg.get('api_key', 'hermes')}"},
-            timeout=300,
+            timeout=float(cfg.get("llm_timeout", 300) or 300),
         )
 
     def chat(self, messages, tools=None, tool_choice=None) -> ChatResult:

@@ -38,6 +38,25 @@ def _message(content=None, tool_calls=None):
     }
 
 
+def test_default_timeout_is_300():
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1"}.get(key, default)
+
+    backend = OpenAIBackend(DictCfg())
+    assert backend.client.timeout.read == 300.0
+
+
+def test_llm_timeout_is_configurable():
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1",
+                    "llm_timeout": 900}.get(key, default)
+
+    backend = OpenAIBackend(DictCfg())
+    assert backend.client.timeout.read == 900.0
+
+
 def test_plain_text_response():
     captured = {}
 

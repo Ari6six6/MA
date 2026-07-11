@@ -181,6 +181,15 @@ DEFAULTS: dict = {
     # narration.jsonl page; never re-injected into context, so it cannot steer a
     # run. On by default: it costs nothing when the model doesn't use it.
     "narrator_enabled": True,
+    # How long ONE HTTP call to the model may take before OpenAIBackend gives up
+    # on it (httpx read/connect/write/pool timeout, all four). Distinct from
+    # max_run_seconds/delegate_max_seconds (Feature 10), which bound a whole RUN
+    # across many calls — this bounds a SINGLE call. A slow box or a big prompt
+    # (retrospection, catalog enrichment, the almanac pass — anything that isn't
+    # the main loop's own turns) can legitimately need more than the old fixed
+    # 300s; raise this instead of watching a real-but-slow completion get cut off
+    # and redone from scratch every retry.
+    "llm_timeout": 300,
     "max_model_len": 0,  # 0 = pick automatically from detected VRAM
     "gpu_port": 8000,
     "local_port": 8000,
