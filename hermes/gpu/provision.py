@@ -69,6 +69,25 @@ _APT_WAIT_FN = (
     "}; "
 )
 
+# Freshly rented boxes sometimes come up with the network stack (systemd-resolved,
+# DHCP-pushed resolv.conf) still settling, so the very first outbound call — here,
+# cloning llama.cpp — can hit "Could not resolve host" / "Temporary failure in name
+# resolution" before DNS is actually ready. Retry those specific transient errors
+# for up to 2 minutes; anything else (bad URL, auth, disk full) still fails fast.
+_NET_WAIT_FN = (
+    "net_wait() { "
+    "for _i in $(seq 1 24); do "
+    '"$@" 2>/tmp/.hermes_net_err && return 0; '
+    "grep -qiE 'could not resolve host|temporary failure in name resolution|"
+    "network is unreachable|could not connect to|connection timed out' "
+    "/tmp/.hermes_net_err "
+    "|| { cat /tmp/.hermes_net_err >&2; return 1; }; "
+    "sleep 5; "
+    "done; "
+    "cat /tmp/.hermes_net_err >&2; return 1; "
+    "}; "
+)
+
 
 def _extra_args(cfg, key: str) -> list[str]:
     """`config set extra_vllm_args "--foo bar"` stores a plain string (the CLI's
@@ -215,13 +234,13 @@ def _install_vllm(endpoint) -> None:
 def _install_llama(endpoint) -> None:
     print(dim("ensuring llama.cpp is built with CUDA (first time can take several minutes)..."))
     install = (
-        _APT_WAIT_FN +
+        _APT_WAIT_FN + _NET_WAIT_FN +
         f"test -x {LLAMA_BIN} && exit 0; "
         f"mkdir -p {LLAMA_DIR} && "
         "apt_wait update -qq && apt_wait install -y -qq "
         "git cmake build-essential libcurl4-openssl-dev && "
         f"rm -rf {LLAMA_DIR}/src && "
-        f"git clone --depth 1 {LLAMA_REPO} {LLAMA_DIR}/src && "
+        f"net_wait git clone --depth 1 {LLAMA_REPO} {LLAMA_DIR}/src && "
         f"cmake -S {LLAMA_DIR}/src -B {LLAMA_DIR}/src/build "
         "-DGGML_CUDA=ON -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release && "
         f"cmake --build {LLAMA_DIR}/src/build --config Release -j --target llama-server && "
@@ -230,10 +249,13 @@ def _install_llama(endpoint) -> None:
     rc, _, err = endpoint.run(install, timeout=3600)
     if rc != 0:
         err = err.strip()
-        hint = (
-            " (needs the CUDA toolkit — use a CUDA-devel image, not runtime-only)"
-            if "nvcc" in err.lower() or "cuda" in err.lower() else ""
-        )
+        low = err.lower()
+        if "resolve host" in low or "name resolution" in low or "network is unreachable" in low:
+            hint = " (the box has no working outbound network/DNS — re-attach or rent a different box)"
+        elif "nvcc" in low or "cuda" in low:
+            hint = " (needs the CUDA toolkit — use a CUDA-devel image, not runtime-only)"
+        else:
+            hint = ""
         raise ProvisionError(f"llama.cpp build failed: {err[-800:]}{hint}")
 
 
