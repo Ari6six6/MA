@@ -4,8 +4,9 @@ ledger to bank them."""
 
 import json
 
-from hermes import agent, almanac, catalog
+from hermes import agent, almanac, catalog, package
 from hermes.llm import MockBackend
+from hermes.tools import build_registry
 
 
 def run_agent(project, cfg, script, **kw):
@@ -72,6 +73,33 @@ def test_index_truncates_to_budget(home):
     idx = almanac.index(max_chars=300)
     assert len(idx) < 500  # budget respected (plus the "N more" tail line)
     assert "more" in idx
+
+
+# -- does a banked entry actually reach the agent's next run? ----------------
+
+def test_almanac_index_in_system_prompt_only_when_enabled(project, cfg, home):
+    almanac.write_entry("bad-py-crash", "bad.py crashes on a bad import",
+                         "the sandbox result showed a traceback pointing at a missing dep")
+    cfg.set("almanac_enabled", False)
+    off = package.assemble(project, "x", {}, cfg)[0]["content"]
+    assert "bad.py crashes on a bad import" not in off
+    assert "## Almanac" not in off
+    cfg.set("almanac_enabled", True)
+    on = package.assemble(project, "x", {}, cfg)[0]["content"]
+    assert "## Almanac" in on
+    assert "`bad-py-crash`" in on
+    assert "bad.py crashes on a bad import" in on
+
+
+def test_almanac_tool_registered_only_when_enabled(project, cfg):
+    cfg.set("almanac_enabled", False)
+    reg = build_registry(project, cfg, lambda *a, **k: True)
+    assert "load_almanac" not in reg.names()
+    assert "almanac_note" not in reg.names()  # never in the doer's own registry
+    cfg.set("almanac_enabled", True)
+    reg = build_registry(project, cfg, lambda *a, **k: True)
+    assert "load_almanac" in reg.names()
+    assert "almanac_note" not in reg.names()  # writing stays the librarian's alone
 
 
 # -- catalog.py: the librarian's outcomes pass --------------------------------
