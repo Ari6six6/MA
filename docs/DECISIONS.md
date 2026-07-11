@@ -689,3 +689,52 @@ of what's happening, in prose, sparingly, not on every tool call.
   written — `agent.py` writes `summary.md` unconditionally with a forced/stubbed
   fallback; that complaint was a house not yet opened, not a missing feature.) Each
   flag remains individually reversible.
+
+## Feature 16 — The librarian memo
+
+Origin: the operator, after watching a run get stuck reinforcing its own past
+mistake, pointed out that the almanac index was there but passive — "he's not
+really picking up on the librarian's work." A smaller/denser model that has
+just re-read its own RUN SUMMARIES/NOTES/LAST REPLY (all its own prior output,
+right there in the user message) will keep pattern-matching onto its own
+history even when a system-prompt index buried after skills/persona holds the
+actual fix. The ask, in the operator's words: something like a memo the
+librarian writes that the agent reads "at the beginning of each one of his
+[runs]" — not another mid-loop voice, just make sure what the librarian found
+actually reaches him before he repeats himself.
+
+- **A second surface, not a replacement for the index.** `almanac.index()` in
+  the system prompt stays — it's the durable, always-there menu for an ad hoc
+  `load_almanac` lookup mid-run. The memo (`almanac.new_since`) is additive:
+  full claim + hypothesis (not just the claim), and only for cards touched
+  since this *project's* own last run — a fresh project sees the whole
+  backlog once; a project that's been running a while sees only what's new.
+- **Placed last in the user message, right next to `# CURRENT REQUEST`.**
+  RUN SUMMARIES/LAST REPLY/NOTES sit earlier and are the agent's own past
+  output — the very thing that was drowning out the librarian's findings.
+  Putting the memo immediately before the actual request, not folded into the
+  system-prompt tail with skills/persona, was the direct fix: unmissable, and
+  positioned right where attention is highest.
+- **A per-project cursor, not a global one.** `Project.almanac_cursor()` /
+  `set_almanac_cursor()` (a plain `.almanac_seen` file, mirroring the shape of
+  `.equipped.json`/`.approved.json`) track the newest almanac id *this
+  project* has already been shown. Global would mean whichever project ran
+  most recently silently marks a finding "seen" for every other project too —
+  wrong, since the whole point of the almanac is that a lesson from one
+  project should still land, in full, on every other project's next run.
+- **The cursor advances in `agent.run`, not inside `package.assemble`.**
+  `assemble` reads project state and stays a pure function of it (same as the
+  catalog digest, skills index, almanac index it already reads) — advancing
+  the cursor is a side effect of a real run happening, not of building a
+  package, so it's a separate step right after `assemble` is called for the
+  actual run. Calling `assemble` twice for the same run (estimation, a
+  preview, a test) can't silently burn the memo.
+- **Delivered once, not held open.** The cursor advances the instant the
+  package is built for a run, whether or not that run's model turns out to
+  actually read the memo. Same posture as the operator prompt itself: told
+  once, not nagged — `load_almanac` remains available for anything that needs
+  a second look later.
+- **On whenever `almanac_enabled` is** — no separate flag. This is the fix to
+  a gap in Feature 14's own delivery mechanism, not a new opt-in decision;
+  `config almanac_enabled false` turns off both the index and the memo
+  together, same as before.

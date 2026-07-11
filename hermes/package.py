@@ -240,8 +240,26 @@ def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict
         last_reply_block,
         "# NOTES (your own)\n" + (notes or "(none)"),
         workspace_header + "\n" + workspace,
-        "# CURRENT REQUEST\n" + prompt.strip(),
     ]
+    # The librarian's memo (feature 14 follow-up): cards banked or refined
+    # since this project's own last run, placed last — right next to the
+    # request itself — on purpose. RUN SUMMARIES/NOTES/LAST REPLY above are
+    # the agent's own past output and self-reinforce; a passive index buried
+    # in the system prompt is easy to never check. This is neither: it's new,
+    # it's unmissable, and it's gone once read (the cursor advances the
+    # moment this package is built for a real run — see agent.run).
+    if cfg.get("almanac_enabled", False):
+        from hermes import almanac as almanac_mod
+        memo = almanac_mod.new_since(
+            project.almanac_cursor(), int(cfg.get("almanac_memo_chars", 1500))
+        )
+        if memo:
+            sections.append(
+                "# LIBRARIAN MEMO (new since your last run — read this before "
+                "repeating an approach; it may be exactly why a past attempt "
+                "didn't work)\n" + memo
+            )
+    sections.append("# CURRENT REQUEST\n" + prompt.strip())
     user = "\n\n".join(sections)
 
     return [

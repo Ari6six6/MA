@@ -82,6 +82,14 @@ class Project:
         return self.root / "population"
 
     @property
+    def almanac_seen_path(self) -> Path:
+        """This project's bookmark into the global almanac (hermes.almanac):
+        the id of the newest card it's already been handed in a librarian
+        memo. Per-project, not global — a fresh project should see the whole
+        backlog once, not just what's new since some other project last read."""
+        return self.root / ".almanac_seen"
+
+    @property
     def equipped_path(self) -> Path:
         return self.tools_dir / ".equipped.json"
 
@@ -247,6 +255,16 @@ class Project:
         stamp = time.strftime("%Y-%m-%d %H:%M")
         with self.notes_path.open("a") as f:
             f.write(f"- [{stamp}] {text.strip()}\n")
+
+    # -- almanac cursor (the librarian memo's bookmark) -----------------------
+    def almanac_cursor(self) -> str | None:
+        if not self.almanac_seen_path.exists():
+            return None
+        text = self.almanac_seen_path.read_text().strip()
+        return text or None
+
+    def set_almanac_cursor(self, entry_id: str) -> None:
+        self.almanac_seen_path.write_text(entry_id)
 
     # -- workspace ------------------------------------------------------------
     def workspace_listing(self, max_entries: int = 60) -> str:

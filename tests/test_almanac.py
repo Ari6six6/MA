@@ -67,6 +67,40 @@ def test_index_empty_when_no_entries(home):
     assert almanac.index() == ""
 
 
+def test_latest_id_none_when_empty(home):
+    assert almanac.latest_id() is None
+
+
+def test_new_since_none_cursor_returns_everything(home):
+    almanac.write_entry("a", "claim a", "why a")
+    almanac.write_entry("b", "claim b", "why b")
+    memo = almanac.new_since(None)
+    assert "`a`" in memo and "claim a" in memo and "why a" in memo
+    assert "`b`" in memo and "claim b" in memo and "why b" in memo
+
+
+def test_new_since_cursor_excludes_older_entries(home):
+    almanac.write_entry("a", "claim a", "why a")
+    cursor = almanac.latest_id()
+    almanac.write_entry("b", "claim b", "why b")
+    memo = almanac.new_since(cursor)
+    assert "`a`" not in memo
+    assert "`b`" in memo and "claim b" in memo
+
+
+def test_new_since_empty_when_nothing_new(home):
+    almanac.write_entry("a", "claim a", "why a")
+    cursor = almanac.latest_id()
+    assert almanac.new_since(cursor) == ""
+
+
+def test_new_since_truncates_to_budget(home):
+    for i in range(50):
+        almanac.write_entry(f"topic-{i}", "x" * 100, "why " * 20)
+    memo = almanac.new_since(None, max_chars=300)
+    assert "more new" in memo
+
+
 def test_index_truncates_to_budget(home):
     for i in range(50):
         almanac.write_entry(f"topic-{i}", "x" * 100, "why")
@@ -89,6 +123,49 @@ def test_almanac_index_in_system_prompt_only_when_enabled(project, cfg, home):
     assert "## Almanac" in on
     assert "`bad-py-crash`" in on
     assert "bad.py crashes on a bad import" in on
+
+
+def test_librarian_memo_appears_once_then_goes_quiet(project, cfg, home):
+    # Nothing banked yet — no memo section at all.
+    fresh = package.assemble(project, "x", {}, cfg)[1]["content"]
+    assert "# LIBRARIAN MEMO" not in fresh
+
+    almanac.write_entry("bad-py-crash", "bad.py crashes on a bad import",
+                         "the sandbox result showed a traceback pointing at a missing dep")
+    # A fresh project (no cursor yet) sees the whole backlog once.
+    user = package.assemble(project, "x", {}, cfg)[1]["content"]
+    assert "# LIBRARIAN MEMO" in user
+    assert "bad.py crashes on a bad import" in user
+    assert user.rindex("# LIBRARIAN MEMO") < user.rindex("# CURRENT REQUEST")
+
+    # Once the project has marked this entry seen, it doesn't repeat.
+    project.set_almanac_cursor(almanac.latest_id())
+    quiet = package.assemble(project, "x", {}, cfg)[1]["content"]
+    assert "# LIBRARIAN MEMO" not in quiet
+
+    # A newer entry shows up again.
+    almanac.write_entry("vast-ssh-timeout", "ssh refuses right after boot", "sshd isn't up yet")
+    again = package.assemble(project, "x", {}, cfg)[1]["content"]
+    assert "# LIBRARIAN MEMO" in again
+    assert "vast-ssh-timeout" in again
+    assert "bad-py-crash" not in again  # already-seen entry isn't repeated
+
+
+def test_librarian_memo_off_when_almanac_disabled(project, cfg, home):
+    almanac.write_entry("a", "claim a", "why a")
+    cfg.set("almanac_enabled", False)
+    user = package.assemble(project, "x", {}, cfg)[1]["content"]
+    assert "# LIBRARIAN MEMO" not in user
+
+
+def test_agent_run_advances_the_memo_cursor(project, cfg, home):
+    almanac.write_entry("bad-py-crash", "bad.py crashes on a bad import", "missing dep")
+    assert project.almanac_cursor() is None
+    run_agent(project, cfg, [{"tool": "finish_run", "args": {"summary": "done"}}])
+    assert project.almanac_cursor() == almanac.latest_id()
+    # The next run's package no longer carries the now-stale memo.
+    user = package.assemble(project, "x", {}, cfg)[1]["content"]
+    assert "# LIBRARIAN MEMO" not in user
 
 
 def test_almanac_tool_registered_only_when_enabled(project, cfg):

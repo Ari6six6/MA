@@ -340,6 +340,18 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
             log({"role": "directives", "content": project.read_directives()})
 
     messages = package.assemble(project, prompt, env, cfg)
+    # The librarian memo (feature 14 follow-up) is "new since last run" — advance
+    # the bookmark the instant it's handed to a real run, so it isn't repeated
+    # next time. package.assemble stays a pure read; this is the one place that
+    # marks it delivered. A failure here never blocks the run.
+    if cfg.get("almanac_enabled", False):
+        from hermes import almanac as almanac_mod
+        try:
+            latest = almanac_mod.latest_id()
+            if latest:
+                project.set_almanac_cursor(latest)
+        except OSError:
+            pass
     if extra_system and messages and messages[0].get("role") == "system":
         messages[0]["content"] += "\n\n" + extra_system.strip()
     project.append_history(run_id, prompt)

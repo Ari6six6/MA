@@ -171,6 +171,7 @@ DEFAULTS: dict = {
     "almanac_enabled": True,
     "almanac_max_turns": 6,  # tool-call budget for one pass (research + the write)
     "almanac_index_chars": 1200,  # budget for the almanac index in the system prompt
+    "almanac_memo_chars": 1500,  # budget for the librarian memo (new-since-last-run) in the package
     # The narrator voice (feature 15): the outer voice, the opposite number of
     # inner_voice. The model may, at its own discretion via <narrate>...</narrate>,
     # describe the scene in story prose for the operator watching — instead of

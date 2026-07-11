@@ -117,3 +117,35 @@ def index(max_chars: int = 1200) -> str:
             break
         lines.append(line)
     return "\n".join(lines)
+
+
+def latest_id() -> str | None:
+    """The id of the most recently written card, or None if the almanac is
+    empty. IDs are `<timestamp>-<topic>`, so lexical order is chronological."""
+    entries = read_entries()
+    return max((e["id"] for e in entries if e.get("id")), default=None)
+
+
+def new_since(cursor: str | None, max_chars: int = 1500) -> str:
+    """The librarian's memo: current cards touched (banked or refined) after
+    `cursor`, an id from a project's own last run (see Project.almanac_cursor).
+    Unlike `index`, this is meant to be READ, not just scanned for a topic to
+    look up — so it carries the claim AND the hypothesis, not just the claim.
+    Empty when nothing changed since `cursor`, so a quiet stretch adds no
+    section at all rather than an empty header."""
+    new = [e for e in current_entries() if cursor is None or e.get("id", "") > cursor]
+    if not new:
+        return ""
+    new.sort(key=lambda e: e.get("id", ""))
+    lines = []
+    total = 0
+    for e in new:
+        conf = f" ({e['confidence']})" if e.get("confidence") else ""
+        block = (f"- `{e.get('topic')}`{conf} — {e.get('claim', '')}\n"
+                 f"  why: {e.get('hypothesis', '')}")
+        if total + len(block) > max_chars:
+            lines.append(f"... ({len(new) - len(lines)} more new — `load_almanac` by topic)")
+            break
+        lines.append(block)
+        total += len(block)
+    return "\n".join(lines)

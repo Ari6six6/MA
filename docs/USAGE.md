@@ -464,11 +464,22 @@ across every project. Its index rides in every system prompt the same way the
 skills index does; `load_almanac(topic)` pulls the full writeup, including any
 research, on demand.
 
+The index alone is easy to skim past — it sits after skills/persona in the
+system prompt, competing with RUN SUMMARIES/NOTES/LAST REPLY (the agent's own
+past output, which self-reinforces). So the package also carries a
+**librarian memo**: cards banked or refined since *this project's* own last
+run, full claim + hypothesis, placed right next to `# CURRENT REQUEST` — new,
+unmissable, and gone once delivered (a per-project cursor in `.almanac_seen`
+advances the moment the package is built for a real run, so it isn't repeated
+next time). A fresh project sees the whole backlog once; an established one
+sees only what's new.
+
 | Flag | Default | Effect |
 |---|---|---|
-| `almanac_enabled` | `true` | outcomes ledger + the end-of-run pass + `load_almanac` |
+| `almanac_enabled` | `true` | outcomes ledger + the end-of-run pass + `load_almanac` + the memo |
 | `almanac_max_turns` | `6` | tool-call budget for one pass (research + the write) |
 | `almanac_index_chars` | `1200` | budget for the almanac index in the system prompt |
+| `almanac_memo_chars` | `1500` | budget for the librarian memo (new-since-last-run) in the package |
 
 On by default. It only fires when something actually looks wrong — a clean
 run costs nothing beyond the (already-logged) outcomes ledger. Writing an
