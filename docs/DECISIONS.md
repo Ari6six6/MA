@@ -734,6 +734,13 @@ actually reaches him before he repeats himself.
   actually read the memo. Same posture as the operator prompt itself: told
   once, not nagged — `load_almanac` remains available for anything that needs
   a second look later.
+- **Peer-to-peer phrasing, not a directive.** First draft read "read this
+  before repeating an approach" — an order handed down, not information
+  passed between colleagues. The operator asked for the tone of "two equals
+  having a professional conversation." Reworded to "a colleague's notes, not
+  an order" plus "use your own judgment on whether it applies" — the memo
+  still gets the agent's attention (it's new, it's unmissable), it just
+  doesn't instruct the agent what to conclude from it.
 - **On whenever `almanac_enabled` is** — no separate flag. This is the fix to
   a gap in Feature 14's own delivery mechanism, not a new opt-in decision;
   `config almanac_enabled false` turns off both the index and the memo

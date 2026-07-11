@@ -255,9 +255,12 @@ def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict
         )
         if memo:
             sections.append(
-                "# LIBRARIAN MEMO (new since your last run — read this before "
-                "repeating an approach; it may be exactly why a past attempt "
-                "didn't work)\n" + memo
+                "# LIBRARIAN MEMO (since your last run here)\n"
+                "A colleague's notes, not an order — the librarian reviewed "
+                "outcomes across projects and flagged what's below as "
+                "possibly relevant to what you're about to do. Worth a look "
+                "if any of it overlaps with your plan; use your own judgment "
+                "on whether it applies.\n\n" + memo
             )
     sections.append("# CURRENT REQUEST\n" + prompt.strip())
     user = "\n\n".join(sections)
