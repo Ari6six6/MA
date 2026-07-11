@@ -62,9 +62,11 @@ def metrics_block(project, window: int) -> str:
     return "\n".join(lines)
 
 
-def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
+def retrospect(project, backend, cfg, think_re=None, log=None, narrate=print) -> bool:
     """One bounded self-review pass over the last `retrospect_window` runs.
-    Returns True when the pass banked something (a note or a skill)."""
+    Returns True when the pass banked something (a note or a skill).
+    `narrate` defaults to print; pass a no-op to silence the progress lines when
+    the pass runs off the main thread (background housekeeping)."""
     from hermes import package
     from hermes import skills as skills_mod
     from hermes.agent import _assistant_msg, strip_think
@@ -117,7 +119,7 @@ def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
                  "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
                                 for tc in result.tool_calls]})
         if shown:
-            print(magenta("  [retrospect] ") + dim(shown.splitlines()[0][:120]))
+            narrate(magenta("  [retrospect] ") + dim(shown.splitlines()[0][:120]))
         if not result.tool_calls:
             return banked
         msgs.append(_assistant_msg(result))
@@ -132,7 +134,7 @@ def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
                     banked = True
                     kind = {"write_note": "note", "write_skill": "skill",
                             "catalog_note": "catalog annotation"}[tc.name]
-                    print(magenta(f"  (retrospect banked a {kind})"))
+                    narrate(magenta(f"  (retrospect banked a {kind})"))
             if log:
                 log({"role": "retrospect-tool", "name": tc.name, "content": out})
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})
@@ -140,7 +142,7 @@ def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
 
 
 def maybe_retrospect(project, backend, cfg, run_id: int, think_re=None,
-                     log=None) -> bool:
+                     log=None, narrate=print) -> bool:
     """Trigger a pass at the end of a run when it's due — every
     `retrospect_every_runs` runs, stateless like directive reconciliation.
     Gated by the caller on `retrospect_enabled`. Returns True if the pass
@@ -148,4 +150,4 @@ def maybe_retrospect(project, backend, cfg, run_id: int, think_re=None,
     every = max(1, int(cfg.get("retrospect_every_runs", 5)))
     if run_id % every != 0:
         return False
-    return retrospect(project, backend, cfg, think_re=think_re, log=log)
+    return retrospect(project, backend, cfg, think_re=think_re, log=log, narrate=narrate)

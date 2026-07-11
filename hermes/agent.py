@@ -3,8 +3,10 @@ loop -> a final answer + a summary the next run will inherit."""
 
 from __future__ import annotations
 
+import atexit
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -222,10 +224,106 @@ def _attempt_fingerprint(name: str, arguments: str) -> str:
     return f"{name}:{normalized[:300]}"
 
 
+_SILENT = lambda *a, **k: None  # noqa: E731 — a no-op narrator for the background
+
+
+# Phase 2: the librarian's three heavy end-of-run passes — retrospection, the
+# catalog, the almanac — run in a daemon thread so the operator gets the prompt
+# back the instant a run finishes, instead of waiting out three model passes on
+# a slow box between every turn. The passes write only their own asset files
+# (notes/skills/cards, and the append-only almanac); the NEXT run's
+# package.assemble reads those files, so the one hard invariant is: join the
+# previous run's housekeeping before this run assembles. We also join at process
+# exit, so a one-shot `run` (or the last turn of a sitting) never loses the work
+# to interpreter shutdown. Only these three qualify — each uses a fail-closed,
+# read-only registry (no stdin, no state-changing side effects), so running them
+# off the main thread is safe. The skills nudge (full registry + the run's real
+# confirm, which can touch stdin) and directive reconciliation (needed before
+# THIS run assembles) stay synchronous.
+#
+# One in flight at a time: a REPL is sequential, and `go` is a separate process,
+# so a single module-level handle is enough. Announcements are collected by the
+# worker and printed by whoever joins — always the main thread, never the worker
+# (this app deliberately keeps background threads off the REPL's stdout; see
+# cli.main's note on patch_stdout).
+class _Housekeeping:
+    def __init__(self):
+        self.thread: threading.Thread | None = None
+        self.announcements: list[str] = []
+
+
+_PENDING = _Housekeeping()
+
+
+def flush_housekeeping(out=print) -> None:
+    """Join any in-flight background housekeeping and print what it did. Called
+    at the start of every run (before assemble — the correctness barrier), when
+    an interactive sitting ends, and at process exit. A no-op when nothing is
+    pending, so synchronous callers (and every test) pay nothing."""
+    t = _PENDING.thread
+    if t is None:
+        return
+    try:
+        t.join()
+    except KeyboardInterrupt:
+        # The operator Ctrl-C'd the wait. The daemon keeps going; the next
+        # flush (or atexit) will join it. Never crash the REPL over this.
+        return
+    _PENDING.thread = None
+    anns, _PENDING.announcements = _PENDING.announcements, []
+    for line in anns:
+        out(line)
+
+
+atexit.register(flush_housekeeping)
+
+
+def _librarian_passes(project, hk_backend, cfg, run_id, code_outcomes,
+                      think_re, log, backend_dead) -> list[str]:
+    """Run the three heavy end-of-run passes and return announcement lines for
+    the caller to print (from the main thread). Prints nothing itself and never
+    raises — safe to run in a background thread. Mirrors the synchronous order
+    the passes used to run in."""
+    anns: list[str] = []
+    if cfg.get("retrospect_enabled", False) and not backend_dead:
+        from hermes import retrospect as retrospect_mod
+        try:
+            if retrospect_mod.maybe_retrospect(
+                project, hk_backend, cfg, run_id,
+                think_re=think_re, log=log, narrate=_SILENT,
+            ):
+                anns.append(magenta("  (retrospection — banked lessons from recent runs)"))
+        except Exception:
+            pass
+    if cfg.get("catalog_enabled", True):
+        from hermes import catalog as catalog_mod
+        cat_backend = None if backend_dead else hk_backend
+        try:
+            n_cards = catalog_mod.maybe_index(
+                project, cat_backend, cfg, run_id, think_re=think_re, log=None,
+            )
+            if n_cards:
+                anns.append(magenta(f"  (catalog — {n_cards} artifact card(s) updated)"))
+        except Exception:
+            pass
+    if cfg.get("almanac_enabled", False) and not backend_dead:
+        from hermes import catalog as catalog_mod
+        try:
+            if catalog_mod.maybe_reflect_outcomes(
+                project, hk_backend, cfg, code_outcomes,
+                think_re=think_re, log=log, narrate=_SILENT,
+            ):
+                anns.append(magenta("  (librarian — banked a hypothesis to the almanac)"))
+        except Exception:
+            pass
+    return anns
+
+
 def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         sandbox=None, quiet=False, max_run_seconds=None, inbox_path=None,
         on_run_started=None, show_thinking=False, ask_operator_fn=None,
-        stall_nudges=None, phantom_nudges=None, extra_system=None):
+        stall_nudges=None, phantom_nudges=None, extra_system=None,
+        background_housekeeping=False):
     """Execute one agent run. `env` carries gpu_status / remote_workspace /
     context_window for the package; `gpu` is an SSHEndpoint or None; `sandbox` is
     the VPS sandbox-host SSHEndpoint (the air-gapped exec container) or None.
@@ -258,7 +356,12 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     exactly the silent-chaining `debate` doesn't otherwise guard against,
     since its stall/phantom nudges are off.
     `extra_system`, when given, is appended to this run's system prompt (a
-    per-mode framing, e.g. the debate contract) without touching persona.md."""
+    per-mode framing, e.g. the debate contract) without touching persona.md.
+    `background_housekeeping` (Phase 2) runs the three heavy end-of-run librarian
+    passes (retrospection, catalog, almanac) in a daemon thread so an interactive
+    caller gets the prompt back immediately; the next run joins them before it
+    assembles, and process exit joins them too. Default False keeps them inline
+    and synchronous — every non-interactive caller and every test is unchanged."""
     out = (lambda *a, **k: None) if quiet else print
     if confirm_fn is None:
         from hermes.confirm import confirm as confirm_fn
@@ -329,6 +432,12 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         approved = _decide(action, detail, viewable)
         log({"role": "gate", "action": action, "approved": approved, "auto": _auto_gate})
         return approved
+
+    # Phase 2 correctness barrier: before we assemble the package (which reads
+    # the catalog cards, the almanac, notes/skills), join any housekeeping the
+    # PREVIOUS run left running in the background and print what it did. A no-op
+    # unless a background run is pending — so synchronous callers pay nothing.
+    flush_housekeeping(out)
 
     # A bounded backend for the librarian's side-passes (reconcile, retrospect,
     # catalog, almanac, skills nudge). They run in the operator's foreground and
@@ -811,51 +920,33 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     status = red("aborted") if aborted else green("complete")
     out(f"\n{dim(f'[run {run_id:04d}')} {status} {dim(f'— {turns} turn(s)]')}")
 
-    # Retrospection (feature 9): every N runs, a fresh-context pass reviews the
-    # recorded metrics + summaries of recent runs (including this one, just
-    # written) and banks recurring lessons as notes/skills. A failed pass is a
-    # no-op — the run's result above already stands.
-    if cfg.get("retrospect_enabled", False) and not backend_dead:
-        from hermes import retrospect as retrospect_mod
-        if retrospect_mod.maybe_retrospect(
-            project, hk_backend, cfg, run_id, think_re=think_re, log=log,
-        ):
-            out(magenta("  (retrospection — banked lessons from recent runs)"))
-
-    # The librarian (feature: catalog): walk the workspace and keep one
-    # self-describing card per artifact. The deterministic core runs even on a
-    # breaker abort (no model needed); enrichment is skipped when the backend is
-    # dead. A failed pass is a no-op — the run's result above stands.
-    if cfg.get("catalog_enabled", True):
-        from hermes import catalog as catalog_mod
-        cat_backend = None if backend_dead else hk_backend
-        try:
-            # log=None on purpose: enrichment samples raw file content to
-            # describe it, and that must NOT flow into the agent's own run
-            # transcript (it would re-introduce the very noise readers like
-            # read_document exist to strip). The catalog is a side-channel.
-            n_cards = catalog_mod.maybe_index(
-                project, cat_backend, cfg, run_id, think_re=think_re, log=None,
+    # The three heavy librarian passes — retrospection (feature 9), the catalog,
+    # and the almanac (feature 14). Each reviews what this run actually did and
+    # banks lessons/cards/hypotheses to the librarian's own asset files. They run
+    # after the run's result is fixed and never change it — pure end-of-run
+    # housekeeping. See _librarian_passes for the per-pass contract (fail-closed,
+    # read-only, never raises). log semantics are unchanged: catalog enrichment
+    # passes log=None (its file-content samples must not pollute the transcript);
+    # retrospection and the almanac keep log=log.
+    if background_housekeeping:
+        # Hand them to a daemon thread so the operator gets the prompt back now.
+        # The next run (or process exit) joins before anything reads these files;
+        # at most one is ever in flight, and we joined the prior one at run start.
+        def _worker():
+            _PENDING.announcements = _librarian_passes(
+                project, hk_backend, cfg, run_id, code_outcomes,
+                think_re, log, backend_dead,
             )
-            if n_cards:
-                out(magenta(f"  (catalog — {n_cards} artifact card(s) updated)"))
-        except Exception:
-            pass  # the librarian is a convenience; never let it fail a run
-
-    # The librarian's second job (feature 14): when this run's code-write/
-    # execution attempts show a real mismatch between what was expected and
-    # what happened, reason about WHY — right here, once, at the end of the
-    # run, not mid-loop. log=log (unlike catalog enrichment above) because
-    # the operator explicitly wants this pass's reasoning kept, not hidden.
-    if almanac_on and not backend_dead:
-        from hermes import catalog as catalog_mod
-        try:
-            if catalog_mod.maybe_reflect_outcomes(
-                project, hk_backend, cfg, code_outcomes, think_re=think_re, log=log,
-            ):
-                out(magenta("  (librarian — banked a hypothesis to the almanac)"))
-        except Exception:
-            pass  # the librarian is a convenience; never let it fail a run
+        t = threading.Thread(target=_worker, daemon=True,
+                             name=f"hermes-housekeeping-{run_id:04d}")
+        _PENDING.thread = t
+        t.start()
+    else:
+        for line in _librarian_passes(
+            project, hk_backend, cfg, run_id, code_outcomes,
+            think_re, log, backend_dead,
+        ):
+            out(line)
     return RunResult(run_id, summary, final_text, turns, aborted)
 
 
