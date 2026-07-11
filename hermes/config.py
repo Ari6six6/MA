@@ -95,6 +95,17 @@ DEFAULTS: dict = {
     # before a task is reported done. Adds a header rule + a one-shot harness
     # nudge when a file-mutating run finishes without running anything.
     "verify_before_done": False,
+    # Stuck-loop guard (feature 12): a model that commits to a failing approach
+    # will happily agree in prose to try something else and then retry the same
+    # thing anyway — a promise with no enforcement behind it. This makes the
+    # correction mechanical instead: once an exact execution attempt has failed
+    # `stuck_repeat_threshold` time(s) this run (or the operator vetoes it live),
+    # repeating it is hard-DENIED before it runs at all, and enough blocked
+    # repeats force a one-shot nudge to actually name a different approach. Off
+    # by default.
+    "stuck_guard_enabled": False,
+    "stuck_repeat_threshold": 1,  # failures of the SAME attempt allowed before repeats are denied
+    "stuck_escalate_blocks": 2,  # blocked repeats in one run before the forced-pivot nudge fires
     # Self-build (feature 9): the agent's own source, gated far tighter than
     # project files — off by default, and even when on, a fixed denylist of
     # safety-critical files (the gates themselves) refuses edits regardless.

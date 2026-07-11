@@ -79,6 +79,7 @@ config file; **full reference and recommended 60K settings in
 | **Self-build** | Lets the agent read and edit **Hermes' own source**, not just the project — gated tighter than everything else: every write asks y/n with a diff, and a fixed set of files (the gates themselves) refuse edits no matter what. | off |
 | **Time-boxed runs** | A wall-clock hard stop (`max_run_seconds`), independent of the turn count — the safety net that still bounds a run when `max_turns` is raised or removed for autopilot use. `delegate_max_seconds` does the same for one delegated child. | off |
 | **Retrospection** | Every N runs, a fresh-context pass reviews harness-recorded per-run metrics (turns, aborts, errors, bounces — numbers the model can't embellish) plus its own summaries, and banks recurring lessons as notes/skills. The recursive self-improvement loop, grounded and bounded. | **on** |
+| **Stuck-loop guard** | Repeating an execution attempt that already failed this run — even reworded — is mechanically `DENIED` before it runs, not just discouraged; a live `veto` (via `go say`) hard-blocks whatever was just attempted, instantly. Enough blocked repeats force a one-shot nudge to name a genuinely different approach. The fix for "agreed to stop, then did it anyway" — the correction has teeth now. | off |
 
 Every toggle is reversible and ships with silent migration — flipping one back
 gives you exactly the prior behaviour.

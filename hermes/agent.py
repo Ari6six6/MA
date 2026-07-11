@@ -151,6 +151,39 @@ def _normalize(text: str) -> str:
     return " ".join(text.split()).lower()
 
 
+_DIGITS_RE = re.compile(r"\d+")
+_EXIT_CODE_RE = re.compile(r"^exit code (\d+)")
+
+
+def _execution_failed(output: str) -> bool:
+    """True if an EXECUTION_TOOLS result counts as a failed attempt for the
+    stuck guard. Most of these tools don't raise a tool ERROR/DENIED when the
+    *command itself* fails — local_shell/sandbox_shell/remote_shell/host_shell
+    all happily return "exit code 1\\n..." for a command that ran fine but did
+    the wrong thing, which is exactly the case that matters here."""
+    if output.startswith(("ERROR", "DENIED")):
+        return True
+    m = _EXIT_CODE_RE.match(output)
+    return bool(m) and m.group(1) != "0"
+
+
+def _attempt_fingerprint(name: str, arguments: str) -> str:
+    """A stable signature for 'the same approach', used by the stuck guard.
+    Same tool + the same normalized command/content — whitespace collapsed,
+    digits blurred so a retry that only tweaked a number still matches — is
+    deliberately coarse: a near-miss on the SAME broken idea should still be
+    caught, not slip through on a technicality."""
+    try:
+        args = json.loads(arguments or "{}")
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    payload = args.get("command") or args.get("content") or json.dumps(args, sort_keys=True)
+    normalized = _DIGITS_RE.sub("#", " ".join(str(payload).split()).lower())
+    return f"{name}:{normalized[:300]}"
+
+
 def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         sandbox=None, quiet=False, max_run_seconds=None, inbox_path=None,
         on_run_started=None, show_thinking=False, ask_operator_fn=None,
@@ -312,6 +345,19 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         if cfg.get("verify_code_runs", True) and sandbox is not None
         else 0
     )
+    # Stuck-loop guard (feature 12): mechanical enforcement, not a nudge the
+    # model can agree to and then ignore. `attempt_failures` counts how many
+    # times an exact fingerprint has already failed; `vetoed_attempts` is set
+    # instantly by a live "veto" from the operator (via inbox) regardless of
+    # any failure count. `last_guarded` is what the veto command targets.
+    stuck_guard_on = cfg.get("stuck_guard_enabled", False)
+    stuck_repeat_threshold = cfg.get("stuck_repeat_threshold", 1)
+    stuck_escalate_after = cfg.get("stuck_escalate_blocks", 2)
+    attempt_failures: dict[str, int] = {}
+    vetoed_attempts: set[str] = set()
+    last_guarded: dict | None = None
+    blocked_repeats = 0
+    escalation_sent = False
     consecutive_errors = 0
     final_text = ""
     prev_shown = ""
@@ -353,7 +399,24 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                 out(yellow("  (85% of the time budget used — telling the model to wrap up)"))
             if inbox_path is not None:
                 for msg in go_state.drain_inbox(inbox_path):
-                    op_msg = package.operator_message(msg)
+                    stripped = msg.strip()
+                    # A live "veto" instantly hard-blocks whatever guarded call
+                    # was last attempted — no parsing of intent, no waiting on
+                    # a failure count, no relying on the model to honour a
+                    # promise made in prose (which is exactly what doesn't work).
+                    is_veto = (
+                        stuck_guard_on and last_guarded is not None
+                        and re.match(r"(?i)^veto\b", stripped)
+                    )
+                    if is_veto:
+                        vetoed_attempts.add(last_guarded["fp"])
+                        op_msg = package.veto_ack(last_guarded["brief"])
+                        out(yellow(
+                            f"  (vetoed: {last_guarded['name']}"
+                            f"({last_guarded['brief']}) — blocked for the rest of this run)"
+                        ))
+                    else:
+                        op_msg = package.operator_message(msg)
                     messages.append({"role": "user", "content": op_msg})
                     log({"role": "operator", "content": msg})
                     # A clear, separated banner so a steer you sent mid-run is
@@ -434,9 +497,26 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     except OSError as e:
                         out(yellow(f"  (checkpoint skipped: {e})"))
                 tool_names_used.append(tc.name)
-                output = _dispatch_maybe_tainted(
-                    registry, tc, ctx, confirm_fn, turn_tainted
-                )
+                fp = None
+                if stuck_guard_on and tc.name in EXECUTION_TOOLS:
+                    fp = _attempt_fingerprint(tc.name, tc.arguments)
+                    last_guarded = {"fp": fp, "name": tc.name, "brief": _brief(tc.arguments)}
+                if fp is not None and (
+                    fp in vetoed_attempts
+                    or attempt_failures.get(fp, 0) >= stuck_repeat_threshold
+                ):
+                    blocked_repeats += 1
+                    output = package.stuck_blocked(
+                        tc.name, last_guarded["brief"],
+                        vetoed=fp in vetoed_attempts,
+                        fails=attempt_failures.get(fp, 0),
+                    )
+                else:
+                    output = _dispatch_maybe_tainted(
+                        registry, tc, ctx, confirm_fn, turn_tainted
+                    )
+                    if fp is not None and _execution_failed(output):
+                        attempt_failures[fp] = attempt_failures.get(fp, 0) + 1
                 if _is_tainting(tc.name, cfg) and not output.startswith(("ERROR", "DENIED")):
                     turn_produced_taint = True
                 log({"role": "tool", "name": tc.name, "content": output})
@@ -458,6 +538,14 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
 
             # Carry taint to the next turn: untrusted content just entered context.
             pending_taint = turn_produced_taint
+
+            if (stuck_guard_on and not escalation_sent
+                    and blocked_repeats >= stuck_escalate_after):
+                escalation_sent = True
+                nudge = package.stuck_escalation_nudge()
+                messages.append({"role": "user", "content": nudge})
+                log({"role": "user", "content": nudge})
+                out(yellow("  (stuck guard: repeated blocks — forcing a real pivot)"))
 
             if ctx.finish_summary is not None:
                 if phantom_nudges_left > 0 and _is_phantom_finish(
@@ -585,6 +673,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         "verify_bounces": verify_bounces,
         "verify_failures": verify_failures,
         "tainted_turns": tainted_turns,
+        "blocked_repeats": blocked_repeats,
         "tools": sorted(set(tool_names_used)),
     }
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
