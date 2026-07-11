@@ -457,6 +457,51 @@ per-body filesystems are deliberately deferred.
   traffic carries no external bytes and shouldn't drown routine runs in y/n prompts.
   The rail is never configurable off.
 
+## Feature 12 — Stuck-loop guard
+
+Origin: an operator session where the model verbally agreed to abandon a
+failing approach ("yeah, you're right, let me do something else"), floated a
+couple of alternatives, then walked straight back to the same dead approach —
+because agreeing was just tokens in context with no enforcement behind them.
+
+- **Mechanical DENIED, not a nudge.** Every other correction in this codebase
+  (stall, phantom, verify-before-done) is a message asking the model to behave
+  differently on the next turn — that's the right shape when the model hasn't
+  already shown it will ignore the ask. Here it has: the whole failure mode is
+  a promise with no teeth. So the fix is enforcement at the same tier as a
+  safety gate — `dispatch` never even runs the tool — not more persuasive
+  prose competing with everything else in the package.
+- **Fingerprint the attempt, don't judge the outcome semantically.** A second
+  LLM call to decide "did this match what you expected" would cost a
+  round-trip per attempt and hand the judgment back to the same weights that
+  are stuck. Instead the harness fingerprints tool name + normalized
+  command/content (digits blurred, whitespace collapsed) and counts real
+  ERROR/DENIED results against it — cheap, deterministic, and it catches a
+  retry that only tweaked a number or reworded a comment, which is exactly the
+  "small variations of the same idea" pattern that was actually observed.
+- **Scoped to `EXECUTION_TOOLS` only.** The observed failure was re-running the
+  same doomed command, not rewriting the same file. Guarding `local_shell` /
+  `sandbox_shell` / `remote_shell` / `host_shell` / `http_request` targets the
+  actual pattern without touching checkpointing or the code-write verifier's
+  separate machinery.
+- **A live `veto` is instant and requires no judgment call.** Parsing operator
+  intent out of free text ("stop doing that", "don't go there again") would be
+  guesswork. A literal `veto` sent through the same inbox channel `go say`
+  already uses hard-blocks whatever guarded call was last attempted, the
+  moment it's drained — no failure count required, no waiting for it to fail
+  again first. This is the direct answer to "I had to stop him and he did it
+  anyway": now stopping him actually stops him.
+- **Escalates once, doesn't nag.** `stuck_escalate_blocks` blocked repeats in
+  one run fire a single forced-pivot nudge (reusing the one-shot pattern from
+  phantom/verify-before-done) that names the situation and asks for the
+  alternatives considered up front — not a bounce loop, since a model that's
+  already stuck doesn't need more friction, it needs one clear instruction to
+  do something else.
+- **Off by default, per the house rule**, even though the failure mode it
+  targets is expensive in operator attention — it changes tool-dispatch
+  behavior, so it gets the same opt-in posture as everything else non-safety
+  in this list.
+
 ## Inner voice + waking the memory loop (Genesis session)
 
 - **Inner voice (`inner_voice`, on).** The model's `<think>` reasoning was already

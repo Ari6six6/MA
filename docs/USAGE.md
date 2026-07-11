@@ -392,6 +392,42 @@ turns every Nth run. `retrospect` in the REPL shows the recorded metrics;
 procedures, and the metrics tell you (and it) whether runs are actually
 getting smoother.
 
+### Feature 12 — Stuck-loop guard
+
+A small model will sometimes commit to a failing approach, agree in prose to
+try something else when you push back, and then quietly retry the same
+approach anyway a few turns later — the agreement was just words, with
+nothing behind it. This feature makes the correction mechanical instead of
+conversational: it doesn't ask the model to behave, it stops the tool call
+from running.
+
+How it works: the harness fingerprints every `local_shell` / `sandbox_shell` /
+`remote_shell` / `host_shell` / `http_request` call (tool + normalized
+command/content — digits blurred, whitespace collapsed, so a retry that only
+tweaked a number still matches). Once that exact attempt has failed
+`stuck_repeat_threshold` time(s) this run — a real tool error, or a shell
+command that exited non-zero — repeating it comes back `DENIED (stuck guard)`
+*without running it at all*. Enough blocked repeats fire a one-shot nudge
+telling the model to name a genuinely different approach instead of retrying.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `stuck_guard_enabled` | `false` | turn on fingerprinting + the hard block + the header rule |
+| `stuck_repeat_threshold` | `1` | failures of the SAME attempt allowed before repeats are denied |
+| `stuck_escalate_blocks` | `2` | blocked repeats in one run before the forced-pivot nudge fires |
+
+**The live veto.** If you're watching a run (`go attach`) and see it heading
+back to something you already told it to drop, send `go say veto` (or `go say
+veto <anything>` — the word "veto" at the start is what matters). That
+instantly hard-blocks whatever guarded call it last attempted, for the rest of
+the run — no failure count required, no re-explaining yourself. This is the
+direct fix for "I told it to stop and it did the thing anyway": now telling it
+to stop actually stops it.
+
+**Recommended when running a smaller/local model** where this failure mode is
+common. It only ever blocks *repeats* — a genuinely different command is never
+touched — so it costs nothing on runs that don't get stuck.
+
 ## Static package budget (measured, 60K box)
 
 Keep an eye on the fixed block — it's sent on every single call:
@@ -424,6 +460,7 @@ delegate_enabled       true     # offload big sub-tasks to a clean child
 prefix_cache_order     true     # cheaper calls if the server caches prefixes
 verify_before_done     true     # don't report done without running it
 retrospect_enabled     true     # cross-run self-review every 5 runs
+stuck_guard_enabled    true     # mechanically block repeating a failed approach; recommended on smaller/local models
 # on already, leave them: checkpointing, directive_header_rule
 # always on, no flag: taint tracking (prompt-injection rail)
 ```
@@ -434,6 +471,7 @@ What stays default:
 - `delegate_max_turns 20`, `delegate_max_depth 1`
 - `checkpoint_max 20`
 - `retrospect_every_runs 5`, `retrospect_window 10`, `retrospect_max_turns 4`
+- `stuck_repeat_threshold 1`, `stuck_escalate_blocks 2`
 
 Every one of these is reversible: flip the flag back and the behaviour is exactly
 what it was before. Nothing here changes on-disk formats without silent migration.

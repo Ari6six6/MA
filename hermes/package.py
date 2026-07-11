@@ -114,6 +114,15 @@ def build_system_prompt(project: Project, env: dict, cfg: Config | None = None) 
             "tests, or hit the endpoint — and seen the real output. Written but "
             "not run is not done; say \"written, not yet run\" and then run it."
         )
+    if cfg is not None and cfg.get("stuck_guard_enabled", False):
+        system += (
+            "\n\nStuck-loop rule: if an execution attempt fails, repeating that "
+            "exact approach — even reworded — is mechanically DENIED, not just "
+            "discouraged. The same is true the instant your operator vetoes an "
+            "approach live. A DENIED (stuck guard) or an operator VETO means "
+            "that path is closed for the rest of this run: name a genuinely "
+            "different approach instead of retrying it with small variations."
+        )
     if cfg is not None and cfg.get("skills_enabled", False):
         from hermes import skills as skills_mod
         idx = skills_mod.index(project)
@@ -295,6 +304,33 @@ def verify_failed(report: str) -> str:
         "run the actual program yourself and read its real output, and only then "
         "`finish_run`."
     )
+
+
+def stuck_blocked(name: str, brief: str, vetoed: bool, fails: int) -> str:
+    if vetoed:
+        reason = "your operator explicitly vetoed this exact approach, live"
+    else:
+        reason = f"this exact approach already failed {fails} time(s) this run"
+    return (
+        f"DENIED (stuck guard): {reason} — {name}({brief}) will not run again "
+        "this run, not even reworded. Stop and reconsider: name the OTHER "
+        "approaches you had in mind for this task and pick a genuinely "
+        "different one, or use ask_operator if you're out of ideas."
+    )
+
+
+def veto_ack(brief: str) -> str:
+    return (
+        f"[operator VETO — sent live: they are explicitly telling you to stop "
+        f"the approach you just tried ({brief}) and not repeat it. This is now "
+        "hard-blocked for the rest of this run — do not retry it, even "
+        "reworded. Acknowledge briefly, then pick a genuinely different "
+        "approach.]"
+    )
+
+
+def stuck_escalation_nudge() -> str:
+    return _template("stuck_guard.md").strip()
 
 
 def stall_nudge(repeated: bool = False) -> str:
