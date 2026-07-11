@@ -783,6 +783,15 @@ def cmd_gpu(cfg, args: str) -> None:
         if ep is None:
             print(yellow("not attached — `gpu attach` first"))
             return
+        # Verify the box is actually reachable BEFORE diving into GPU detection —
+        # otherwise a dropped/reset SSH link surfaces as a confusing "cannot
+        # serve: <gpu detection>" error that looks like a serve/model bug when
+        # the real fix is just to re-attach.
+        ok, why = ep.check_detail()
+        if not ok:
+            print(red("box not reachable") + dim(f" — {why}"))
+            print(dim("re-attach with `gpu attach` (or retry if it was a transient drop), then `gpu serve`"))
+            return
         if "net_isolation" not in state:  # attached with an older version
             state["net_isolation"] = probe_net_isolation(ep)
             save_gpu_state(state)

@@ -423,6 +423,26 @@ def test_debate_busy_guard(cfg, capsys, monkeypatch):
     go_state.clear_entry(project.name)
 
 
+def test_gpu_serve_prechecks_connectivity_before_gpu_detection(cfg, capsys, monkeypatch):
+    """A dropped SSH link must report as 'box not reachable — re-attach', not as
+    a confusing GPU-detection failure deep in provisioning."""
+    class _Ep:
+        def check_detail(self):
+            return False, "the ssh link dropped mid-handshake — just run it again"
+
+    monkeypatch.setattr(cli, "load_gpu_state", lambda: {"host": "h", "port": 22, "user": "root"})
+    monkeypatch.setattr(cli, "endpoint_from_state", lambda state: _Ep())
+    from hermes.gpu import provision
+    monkeypatch.setattr(provision, "detect_gpus",
+                        lambda ep: (_ for _ in ()).throw(
+                            AssertionError("must not detect GPUs on an unreachable box")))
+
+    cli.cmd_gpu(cfg, "serve")
+    out = capsys.readouterr().out
+    assert "box not reachable" in out
+    assert "re-attach" in out
+
+
 def test_go_end_to_end_subprocess_smoke(cfg):
     """No Popen mocking: actually spawns `python -u -m hermes.go_worker` and
     waits for it to land, proving the real wiring (argv, log redirection,
