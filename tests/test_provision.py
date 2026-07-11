@@ -74,6 +74,30 @@ def test_vllm_command_uses_venv_binary(cfg):
     assert vllm_command(cfg, plan).startswith(f"{VLLM_BIN} serve ")
 
 
+def test_extra_vllm_args_as_shell_string(cfg):
+    # `config set extra_vllm_args "--foo bar"` stores a plain string (there's
+    # no list syntax on the CLI) — it must be split into flags, not iterated
+    # character-by-character.
+    cfg.set("extra_vllm_args", "--enforce-eager --disable-custom-all-reduce", coerce=False)
+    plan = plan_serve([("NVIDIA H200", 143771)], cfg)
+    cmd = vllm_command(cfg, plan)
+    assert "--enforce-eager --disable-custom-all-reduce" in cmd
+
+
+def test_extra_llama_args_as_shell_string(cfg):
+    cfg.set("extra_llama_args", "--flash-attn --no-mmap", coerce=False)
+    spec = get_spec("qwen")
+    plan = plan_serve([("RTX 4090", 24564)], cfg, spec)
+    cmd = llama_command(cfg, plan, spec)
+    assert "--flash-attn --no-mmap" in cmd
+
+
+def test_extra_vllm_args_still_accepts_a_list(cfg):
+    cfg.set("extra_vllm_args", ["--enforce-eager"], coerce=False)
+    plan = plan_serve([("NVIDIA H200", 143771)], cfg)
+    assert "--enforce-eager" in vllm_command(cfg, plan)
+
+
 def test_launch_installs_into_isolated_venv(cfg):
     from conftest import FakeEndpoint
 

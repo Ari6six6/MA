@@ -16,6 +16,7 @@ Both write ~/vllm.pid and ~/vllm.log so `gpu status`/`down` stay runtime-agnosti
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 import time
 from dataclasses import dataclass, field
@@ -50,6 +51,16 @@ LLAMA_REPO = "https://github.com/ggml-org/llama.cpp"
 
 class ProvisionError(Exception):
     pass
+
+
+def _extra_args(cfg, key: str) -> list[str]:
+    """`config set extra_vllm_args "--foo bar"` stores a plain string (the CLI's
+    `config set` has no list syntax), not the list the default is typed as.
+    Split it like a shell would rather than iterating it character-by-character."""
+    val = cfg.get(key, [])
+    if isinstance(val, str):
+        return shlex.split(val)
+    return [str(a) for a in val]
 
 
 @dataclass
@@ -139,7 +150,7 @@ def vllm_command(cfg, plan: ServePlan, spec: ModelSpec | None = None) -> str:
     ]
     if spec.tokenizer:
         parts.append(f"--tokenizer {spec.tokenizer}")
-    parts += [str(a) for a in cfg.get("extra_vllm_args", [])]
+    parts += _extra_args(cfg, "extra_vllm_args")
     return " ".join(parts)
 
 
@@ -164,7 +175,7 @@ def llama_command(cfg, plan: ServePlan, spec: ModelSpec | None = None) -> str:
         "--n-gpu-layers 999",  # offload all layers; harmless if the model has fewer
         "--jinja",
     ]
-    parts += [str(a) for a in cfg.get("extra_llama_args", [])]
+    parts += _extra_args(cfg, "extra_llama_args")
     return " ".join(parts)
 
 
