@@ -178,7 +178,20 @@ def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict
         last_reply_block = "# YOUR LAST REPLY\n(none yet)"
 
     notes = truncate_keep_tail(project.read_notes().strip(), budget["notes"])
-    workspace = truncate_keep_head(project.workspace_listing(), budget["workspace"])
+    # The librarian's cards (kind + purpose + supersedes/duplicate links) replace
+    # the bare name+size listing when a catalog exists, so the model sees what its
+    # files are FOR. Falls back to the plain listing before the first catalog pass.
+    catalog_view = ""
+    if cfg.get("catalog_enabled", True):
+        from hermes import catalog as catalog_mod
+        catalog_view = catalog_mod.digest(
+            project, min(cfg.get("catalog_digest_chars", 2000), budget["workspace"])
+        )
+    workspace = catalog_view or truncate_keep_head(
+        project.workspace_listing(), budget["workspace"]
+    )
+    workspace_header = "# WORKSPACE (your files — what each is for)" if catalog_view \
+        else "# WORKSPACE"
 
     if directives_on:
         history_header = (
@@ -205,7 +218,7 @@ def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict
         "# RUN SUMMARIES (your own past runs)\n" + (summaries or "(none yet)"),
         last_reply_block,
         "# NOTES (your own)\n" + (notes or "(none)"),
-        "# WORKSPACE\n" + workspace,
+        workspace_header + "\n" + workspace,
         "# CURRENT REQUEST\n" + prompt.strip(),
     ]
     user = "\n\n".join(sections)

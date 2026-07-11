@@ -1097,6 +1097,54 @@ def _common_prefix_len(a: str, b: str) -> int:
     return i
 
 
+def cmd_catalog(cfg, args: str) -> None:
+    """The librarian's cards for this space's workspace.
+      catalog          show the current card per artifact (what each file is for)
+      catalog now      force a catalog pass immediately (needs the endpoint for
+                       purpose/tags; the deterministic core runs regardless)
+      catalog log      show the full append-only card history (supersessions too)
+    """
+    from hermes import catalog as catalog_mod
+    project = _current_project(cfg)
+    if project is None:
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
+        return
+    sub = args.strip()
+    if sub == "now":
+        from hermes.models import resolve
+        backend = None
+        if cfg.get("backend") == "mock" or _probe_vllm(cfg):
+            spec = resolve(cfg)
+            think_re = agent._think_re(spec.think_tags)
+            backend = make_backend(cfg)
+        else:
+            think_re = None
+            print(dim("endpoint down — running the deterministic core only "
+                      "(no purpose/tags)."))
+        run_id = project.next_run_id() - 1  # attribute to the most recent run
+        n = catalog_mod.index(project, backend, cfg, max(run_id, 0), think_re=think_re)
+        print(green(f"catalogued {n} artifact(s).") if n else
+              dim("nothing new to catalogue."))
+        return
+    if sub == "log":
+        entries = catalog_mod.read_entries(project)
+        if not entries:
+            print(dim("(no catalog yet — it fills as the agent writes files)"))
+        for e in entries:
+            sup = f" supersedes {e['supersedes']}" if e.get("supersedes") else ""
+            stamp = dim(f"{e.get('ts', '')} r{e.get('run', '?')}")
+            kind = e.get("kind", "file")
+            path = e.get("path", "?")
+            print(f"{stamp} [{kind}] {path}{dim(sup)}")
+        return
+    view = catalog_mod.digest(project, cfg.get("catalog_digest_chars", 2000))
+    if not view:
+        print(dim("(no catalog yet — it fills as the agent writes files; "
+                  "`catalog now` to build it)"))
+        return
+    print(view)
+
+
 def cmd_debug(cfg, args: str) -> None:
     """Diagnostics. `debug prefix` assembles two consecutive packages (with a
     changed runtime status between them) and reports the shared byte prefix — so
@@ -1343,6 +1391,7 @@ HELP_MORE = f"""\
 {bold('Where your work lives')}
 {cyan('space')} new|use|list    a space is one workbench of work (its own mission, files, run history) {dim('(alias: p)')}
 {cyan('mission')} [edit]        the standing brief   ·   {cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
+{cyan('catalog')} [now|log]     the librarian's index of your workspace — what each file is for
 {cyan('checkpoint')} [restore <id>]  snapshots taken before the agent changes files
 
 {bold('The GPU')}
@@ -1400,6 +1449,8 @@ def dispatch(cfg, line: str) -> bool:
         cmd_checkpoint(cfg, rest)
     elif cmd == "retrospect":
         cmd_retrospect(cfg, rest)
+    elif cmd == "catalog":
+        cmd_catalog(cfg, rest)
     elif cmd in ("mission", "notes", "history", "summaries"):
         cmd_info(cfg, cmd, rest)
     elif cmd == "tools":

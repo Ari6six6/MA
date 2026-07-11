@@ -117,6 +117,20 @@ DEFAULTS: dict = {
     "retrospect_every_runs": 5,
     "retrospect_window": 10,  # how many recent runs one pass reviews
     "retrospect_max_turns": 4,  # tool-call budget for one pass
+    # The librarian (hermes/catalog.py): a side-pass that keeps one self-
+    # describing card per workspace artifact — kind, one-line purpose, tags,
+    # provenance, and inferred supersedes/duplicate links. The cards ride in the
+    # package in place of the bare workspace listing, so a later run sees WHAT
+    # its files are for, not just that they exist. On by default: the
+    # deterministic core (hashing, kind, supersession) has no model cost and no
+    # risk; only the optional purpose/tags enrichment calls the model.
+    "catalog_enabled": True,
+    "catalog_enrich": True,  # let the model fill in purpose/tags (deterministic core runs regardless)
+    "catalog_every_runs": 1,  # cadence; 1 = keep cards fresh every run
+    "catalog_max_file_bytes": 200_000,  # files bigger than this are identity-hashed, not content-hashed
+    "catalog_sample_bytes": 1500,  # bytes of each file shown to the model during enrichment
+    "catalog_scope": "workspace",  # every card's scope; a future shared lexicon flips this
+    "catalog_digest_chars": 2000,  # budget for the card view injected into the package
     "max_model_len": 0,  # 0 = pick automatically from detected VRAM
     "gpu_port": 8000,
     "local_port": 8000,

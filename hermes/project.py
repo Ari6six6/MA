@@ -52,6 +52,13 @@ class Project:
         return self.root / "history.jsonl"
 
     @property
+    def catalog_path(self) -> Path:
+        """The librarian's append-only card log (hermes.catalog): one JSON card
+        per line describing an artifact in the workspace. Append-only so a
+        rewrite supersedes rather than erases — provenance survives."""
+        return self.root / "catalog.jsonl"
+
+    @property
     def tools_dir(self) -> Path:
         return self.root / "tools"
 

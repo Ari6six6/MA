@@ -601,6 +601,26 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
             project, backend, cfg, run_id, think_re=think_re, log=log,
         ):
             out(magenta("  (retrospection — banked lessons from recent runs)"))
+
+    # The librarian (feature: catalog): walk the workspace and keep one
+    # self-describing card per artifact. The deterministic core runs even on a
+    # breaker abort (no model needed); enrichment is skipped when the backend is
+    # dead. A failed pass is a no-op — the run's result above stands.
+    if cfg.get("catalog_enabled", True):
+        from hermes import catalog as catalog_mod
+        cat_backend = None if backend_dead else backend
+        try:
+            # log=None on purpose: enrichment samples raw file content to
+            # describe it, and that must NOT flow into the agent's own run
+            # transcript (it would re-introduce the very noise readers like
+            # read_document exist to strip). The catalog is a side-channel.
+            n_cards = catalog_mod.maybe_index(
+                project, cat_backend, cfg, run_id, think_re=think_re, log=None,
+            )
+            if n_cards:
+                out(magenta(f"  (catalog — {n_cards} artifact card(s) updated)"))
+        except Exception:
+            pass  # the librarian is a convenience; never let it fail a run
     return RunResult(run_id, summary, final_text, turns, aborted)
 
 
