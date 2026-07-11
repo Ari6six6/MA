@@ -176,9 +176,52 @@ def test_launch_llama_builds_with_cuda_then_serves(cfg):
     build = ep.calls[1]
     assert "llama.cpp" in build and "GGML_CUDA=ON" in build
     assert VENV_DIR not in build  # the native build, not the vLLM venv
+    # apt-get runs through the lock-wait wrapper, not raw, so a freshly booted
+    # box's cloud-init/unattended-upgrades apt lock gets retried instead of
+    # failing the whole provision on the first collision.
+    assert "apt_wait update -qq && apt_wait install" in build
+    assert "apt-get update -qq && apt-get install" not in build
     # Launched the native server with tool-calling on.
     assert ep.calls[3].startswith("HF_HUB_ENABLE_HF_TRANSFER=1 nohup " + LLAMA_BIN)
     assert "--jinja" in ep.calls[3]
+
+
+def test_llama_build_failure_only_hints_cuda_when_relevant(cfg):
+    from conftest import FakeEndpoint
+    from hermes.models import get_spec
+
+    spec = get_spec("qwen")
+    plan = plan_serve([("RTX 4090", 24564)], cfg, spec)
+
+    # An apt-lock collision (already retried and still failing) isn't a missing
+    # CUDA toolkit — don't tack on a misleading hint that sends the operator
+    # chasing the wrong problem.
+    ep = FakeEndpoint([
+        (0, "", ""),
+        (1, "", "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1258 (apt-get)"),
+    ])
+    with pytest.raises(ProvisionError) as exc:
+        launch(ep, cfg, plan, spec)
+    assert "CUDA toolkit" not in str(exc.value)
+
+    # A genuine missing-nvcc failure still gets the hint.
+    ep = FakeEndpoint([
+        (0, "", ""),
+        (1, "", "CMake Error: nvcc not found"),
+    ])
+    with pytest.raises(ProvisionError) as exc:
+        launch(ep, cfg, plan, spec)
+    assert "CUDA toolkit" in str(exc.value)
+
+
+def test_vllm_install_uses_apt_wait(cfg):
+    from conftest import FakeEndpoint
+
+    ep = FakeEndpoint([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", "")])
+    launch(ep, cfg, plan_serve([("NVIDIA H200", 143771)], cfg))
+    install = ep.calls[1]
+    assert "apt_wait update -qq && apt_wait install" in install
+    assert "apt-get update -qq && apt-get install" not in install
 
 
 def test_qwen_official_serves_fp8_on_vllm(cfg):

@@ -53,6 +53,23 @@ class ProvisionError(Exception):
     pass
 
 
+# Freshly booted boxes often have cloud-init or unattended-upgrades holding the
+# dpkg/apt lock for the first minute or two. Rather than dying on the first
+# collision (`Could not get lock ... held by process N`), retry for up to 5
+# minutes; any other apt failure (missing package, etc.) still fails fast.
+_APT_WAIT_FN = (
+    "apt_wait() { "
+    "for _i in $(seq 1 60); do "
+    "apt-get \"$@\" 2>/tmp/.hermes_apt_err && return 0; "
+    "grep -q 'Could not get lock\\|is held by process' /tmp/.hermes_apt_err "
+    "|| { cat /tmp/.hermes_apt_err >&2; return 1; }; "
+    "sleep 5; "
+    "done; "
+    "cat /tmp/.hermes_apt_err >&2; return 1; "
+    "}; "
+)
+
+
 def _extra_args(cfg, key: str) -> list[str]:
     """`config set extra_vllm_args "--foo bar"` stores a plain string (the CLI's
     `config set` has no list syntax), not the list the default is typed as.
@@ -182,10 +199,11 @@ def llama_command(cfg, plan: ServePlan, spec: ModelSpec | None = None) -> str:
 def _install_vllm(endpoint) -> None:
     print(dim("ensuring vLLM is installed (first time can take a few minutes)..."))
     install = (
+        _APT_WAIT_FN +
         f"test -x {VLLM_BIN} && exit 0; "
         # python3-venv is missing on some base images — install it on demand.
         f"python3 -m venv --system-site-packages {VENV_DIR} 2>/dev/null || "
-        f"{{ apt-get update -qq && apt-get install -y -qq python3-venv && "
+        f"{{ apt_wait update -qq && apt_wait install -y -qq python3-venv && "
         f"python3 -m venv --system-site-packages {VENV_DIR}; }} && "
         f"{VENV_DIR}/bin/pip install -q -U pip vllm hf_transfer"
     )
@@ -197,9 +215,10 @@ def _install_vllm(endpoint) -> None:
 def _install_llama(endpoint) -> None:
     print(dim("ensuring llama.cpp is built with CUDA (first time can take several minutes)..."))
     install = (
+        _APT_WAIT_FN +
         f"test -x {LLAMA_BIN} && exit 0; "
         f"mkdir -p {LLAMA_DIR} && "
-        "apt-get update -qq && apt-get install -y -qq "
+        "apt_wait update -qq && apt_wait install -y -qq "
         "git cmake build-essential libcurl4-openssl-dev && "
         f"rm -rf {LLAMA_DIR}/src && "
         f"git clone --depth 1 {LLAMA_REPO} {LLAMA_DIR}/src && "
@@ -210,10 +229,12 @@ def _install_llama(endpoint) -> None:
     )
     rc, _, err = endpoint.run(install, timeout=3600)
     if rc != 0:
-        raise ProvisionError(
-            f"llama.cpp build failed: {err.strip()[-800:]} "
-            "(needs the CUDA toolkit — use a CUDA-devel image, not runtime-only)"
+        err = err.strip()
+        hint = (
+            " (needs the CUDA toolkit — use a CUDA-devel image, not runtime-only)"
+            if "nvcc" in err.lower() or "cuda" in err.lower() else ""
         )
+        raise ProvisionError(f"llama.cpp build failed: {err[-800:]}{hint}")
 
 
 def launch(endpoint, cfg, plan: ServePlan, spec: ModelSpec | None = None) -> None:
