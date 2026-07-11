@@ -17,6 +17,8 @@ import json
 import time
 from dataclasses import dataclass, field
 
+from hermes.ui import dim, heartbeat, yellow
+
 
 @dataclass
 class ToolCall:
@@ -72,11 +74,20 @@ class OpenAIBackend:
             body["tool_choice"] = tool_choice
 
         last_error = None
-        for delay in (0,) + self.RETRY_DELAYS:
+        for attempt, delay in enumerate((0,) + self.RETRY_DELAYS, start=1):
             if delay:
+                print(yellow(
+                    f"  vLLM/llama.cpp call failed ({last_error}) — "
+                    f"retrying in {delay}s (attempt {attempt}/{1 + len(self.RETRY_DELAYS)})"
+                ))
                 time.sleep(delay)
             try:
-                resp = self.client.post(self.url, json=body)
+                # A single completion can legitimately take minutes (a large
+                # context to reprocess, a slow box) with nothing to show for
+                # it until the whole response lands — the heartbeat is the
+                # only thing standing between that and looking dead.
+                with heartbeat("waiting on the model"):
+                    resp = self.client.post(self.url, json=body)
                 if resp.status_code >= 500:
                     last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
                     continue
