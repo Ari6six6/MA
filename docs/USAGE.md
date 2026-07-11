@@ -475,6 +475,35 @@ run costs nothing beyond the (already-logged) outcomes ledger. Writing an
 entry is exclusive to this pass, the same split the catalog uses for
 `catalog_note`: the doer doesn't curate its own long-term record mid-task.
 
+### Feature 15 — The narrator voice
+
+The outer voice, the opposite number of the inner voice. `<think>` is private
+reasoning: captured, but never shown or re-injected. `<narrate>` is the
+reverse — the model may, sparingly and at its own discretion (not every
+turn, not after every tool call), wrap a short story-prose aside in
+`<narrate>...</narrate>`. It's cut out of the dense reply and printed
+separately, in its own color, so it never blends into or crowds out the real
+technical answer — and it is never sent back on a later turn, so it can't be
+used to steer the run or to smuggle memory the model should be using
+`write_note`/`finish_run` for instead.
+
+On top of that, the harness itself narrates the village's two hard lifecycle
+events — a citizen's birth, its harvest — unconditionally, in the same voice,
+the moment either happens. That part needs no model cooperation: an operator
+watching a run where the model never once uses `<narrate>` still sees, on
+screen, that a citizen was born and that its watch ended.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `narrator_enabled` | `true` | show/log `<narrate>` asides + the village birth/harvest lines |
+
+Both halves write to `runs/NNNN/narration.jsonl` when they fire, mirroring
+`thinking.jsonl`. On by default: it costs nothing when the model doesn't use
+the tag, and the village lines are one `print` each. Turn off with
+`config narrator_enabled false` — the tag is still always stripped from the
+visible reply either way, so disabling it only silences the display, not the
+text ever leaking through raw.
+
 ## Static package budget (measured, 60K box)
 
 Keep an eye on the fixed block — it's sent on every single call:
@@ -509,9 +538,10 @@ verify_before_done     true     # don't report done without running it
 retrospect_enabled     true     # cross-run self-review every 5 runs
 stuck_guard_enabled    true     # mechanically block repeating a failed approach; recommended on smaller/local models
 # on already, leave them: checkpointing, directive_header_rule
-# also on already, at the operator's explicit request (the house default-off
-# rule's two exceptions, alongside checkpointing): reflect_nudge_enabled,
-# almanac_enabled — see DECISIONS.md Feature 13/14 if you want them off
+# also on already, at the operator's explicit request (exceptions to the house
+# default-off rule, alongside checkpointing): reflect_nudge_enabled,
+# almanac_enabled, narrator_enabled — see DECISIONS.md Feature 13/14/15 if you
+# want them off
 # always on, no flag: taint tracking (prompt-injection rail)
 ```
 

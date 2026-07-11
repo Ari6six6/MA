@@ -39,6 +39,7 @@ dim = _paint("2")
 red = _paint("31")
 green = _paint("32")
 yellow = _paint("33")
+blue = _paint("34")
 magenta = _paint("35")
 cyan = _paint("36")
 
