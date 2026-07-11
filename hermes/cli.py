@@ -325,6 +325,95 @@ def cmd_session(cfg, args: str) -> None:
     print(dim(f"— session ended — {exchanges} exchange(s) —"))
 
 
+# The debate contract: injected as this run's system framing (not persona.md,
+# which stays yours to edit). It tells the agent this is a table, not a task —
+# so paired with stall/phantom nudges at 0, a pure-prose turn is a valid answer.
+DEBATE_FRAMING = """\
+You are at the table with the operator — a live, unhurried debate, not a job to
+finish. The person speaking is the operator described in your persona: your
+principal and your partner, working with you, not against you. Reason out loud
+in plain language. Say plainly what you are doing and why, and withhold nothing
+you know that bears on what they're asking. You are NOT required to call a tool
+or produce a deliverable this turn — thinking it through together IS the work.
+Use tools when they genuinely help (read a file they point you to, check a
+fact), then come back to the conversation. When you've said your piece, stop and
+hand the turn back so they can answer."""
+
+
+def cmd_debate(cfg, args: str) -> None:
+    """A table, not a task: sit across from the agent and talk it out.
+
+    Same 42-minute sitting and the same live back-and-forth as `session`, but
+    the "act or finish_run" pressure is off (stall/phantom nudges = 0), so a
+    turn that's pure reasoning is a valid answer instead of something the
+    harness bounces. The agent knows it's talking to the operator (persona) and
+    is told to withhold nothing. `persona`/`persona edit` reshapes who it is
+    without leaving the table; `done`/`exit` (or Ctrl-C at the prompt) ends it."""
+    project = _ensure_space(cfg)
+    busy = go_state.active_entry(project.name)
+    if busy:
+        print(yellow(f"'{project.name}' is busy") + dim(
+            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
+        return
+    prepared = _prepare_run(cfg)
+    if prepared is None:
+        return
+    gpu, sandbox, env, backend = prepared
+
+    total = GO_MAX_RUN_SECONDS
+    started = time.monotonic()
+    mins = total // 60
+
+    def ask_stdin(_question: str) -> str:
+        try:
+            return input(magenta("  reply> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ""
+
+    go_state.start_entry(project.name, os.getpid(), kind="debate")
+    print(dim(f"— at the table in '{project.name}' — up to {mins} min, no rush. "
+              f"Talk it through; `persona` to reshape who you're talking to; "
+              f"`done` to get up. —"))
+    first = args.strip()
+    exchanges = 0
+    try:
+        while True:
+            remaining = total - (time.monotonic() - started)
+            if remaining <= 5:
+                print(dim(f"— the {mins} minutes are up — leaving the table —"))
+                break
+            if first:
+                msg, first = first, ""
+            else:
+                try:
+                    msg = input(magenta("you> ")).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+            low = msg.lower()
+            if low in ("done", "exit", "quit", "bye"):
+                break
+            if low in ("persona", "persona edit"):
+                _edit_file(persona_path())  # reshape who's at the table, mid-sitting
+                continue
+            if not msg:
+                continue
+            exchanges += 1
+            agent.run(
+                project, msg, cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
+                max_run_seconds=int(remaining),
+                ask_operator_fn=ask_stdin,
+                stall_nudges=0, phantom_nudges=0, extra_system=DEBATE_FRAMING,
+                on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+            )
+            left = int(max(0, total - (time.monotonic() - started)) // 60)
+            print(dim(f"— your turn — ~{left} min left at the table (`done` to end) —"))
+    finally:
+        go_state.clear_entry(project.name)
+    print(dim(f"— left the table — {exchanges} exchange(s) —"))
+
+
 def cmd_go(cfg, args: str) -> None:
     """The one verb for a space: say something. Nothing running yet? It
     starts, and you watch it live. Something already running? What you typed
@@ -1216,6 +1305,7 @@ def cmd_tools(cfg) -> None:
 # `help more` opens everything else — still there, just out of the way.
 HELP = f"""\
 {bold('the essentials')}
+{cyan('debate')}         sit at the table and talk it out — a {GO_MAX_RUN_SECONDS // 60}-min conversation, no rush {dim('(alias: d)')}
 {cyan('go')} <text>      start a {GO_MAX_RUN_SECONDS // 60}-min session; watch it, steer it, it can ask you back
 {cyan('go')}             drop back into what's running
 {cyan('stop')}           {bold('killswitch')} — stop it dead now ({cyan('stop all')} for everything)
@@ -1236,6 +1326,7 @@ HELP_MORE = f"""\
 {cyan('go')} attach [space]     drop into a running session's live view — Ctrl-C to step out
 {cyan('go')} stop [space|all]   {bold('killswitch')} — stop a detached run dead {dim('(alias: stop)')}
 {cyan('go')} status             list what's running
+{cyan('debate')} [text]         sit at the table and reason it out — no "act or finish" pressure, pure talk {dim('(alias: d)')}
 {cyan('session')} [text]        sit WITH it in the foreground the whole time instead {dim('(alias: s)')}
 {cyan('run')} <text>            one foreground exchange, then back to the prompt {dim('(alias: r)')}
 
@@ -1262,11 +1353,13 @@ def dispatch(cfg, line: str) -> bool:
         return True
     cmd, _, rest = line.partition(" ")
     cmd = {"r": "run", "p": "project", "g": "gpu", "s": "session",
-           "exit": "quit", "q": "quit"}.get(cmd, cmd)
+           "d": "debate", "exit": "quit", "q": "quit"}.get(cmd, cmd)
     if cmd == "quit":
         return False
     elif cmd == "help":
         print(HELP_MORE if rest.strip() in ("more", "all", "full") else HELP)
+    elif cmd == "debate":
+        cmd_debate(cfg, rest)
     elif cmd == "session":
         cmd_session(cfg, rest)
     elif cmd == "go":
@@ -1313,8 +1406,8 @@ def main() -> None:
     cfg.save()  # materialize defaults + persona on first start
     hermes_home().mkdir(parents=True, exist_ok=True)
     print(BANNER)
-    print(dim("start with  ") + cyan("go <what you want done>") + dim("   ·   ")
-          + cyan("help") + dim(" for the rest"))
+    print(dim("sit down: ") + cyan("debate") + dim("   ·   send it off: ")
+          + cyan("go <what you want done>") + dim("   ·   ") + cyan("help"))
 
     session = None
     ansi = None
@@ -1327,20 +1420,11 @@ def main() -> None:
         pass
 
     def _loop() -> None:
+        # The prompt is always the bare `hermes> ` — no space name. You're here
+        # to talk to the one guy, not to manage projects; which workbench you're
+        # on is a `space` concern, kept out of the face you look at every line.
+        prompt_text = f"{magenta('hermes> ')}"
         while True:
-            # Name the space in the prompt only when you actually have more than
-            # one to keep straight. With a single space (the common case) the
-            # bare `hermes>` reads as "just here", not "a project is selected" —
-            # which is the point: you never chose a project, so don't show one.
-            proj = cfg.get("current_project") or ""
-            try:
-                multi = len(Project.list_names(_projects_dir(cfg))) > 1
-            except Exception:
-                multi = False
-            if proj and multi:
-                prompt_text = f"{magenta('hermes')} {cyan(proj)}{magenta(' > ')}"
-            else:
-                prompt_text = f"{magenta('hermes> ')}"
             try:
                 line = session.prompt(ansi(prompt_text)) if session else input(prompt_text)
             except (EOFError, KeyboardInterrupt):

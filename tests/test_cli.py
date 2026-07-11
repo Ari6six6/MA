@@ -344,6 +344,85 @@ def test_session_ends_when_the_time_budget_is_spent(cfg, capsys, monkeypatch):
     assert "0 exchange" in out
 
 
+def test_debate_runs_an_exchange_and_ends_on_done(cfg, capsys, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")  # end after the arg
+
+    cli.cmd_debate(cfg, "let's think this through")
+
+    project = cli.Project.load(cli._projects_dir(cfg), cli.DEFAULT_SPACE)
+    assert (project.runs_dir / "0001").exists()  # a turn actually ran with no stall-nudge
+    assert go_state.active_entry(cli.DEFAULT_SPACE) is None  # cleaned up in finally
+    out = capsys.readouterr().out
+    assert "left the table" in out
+    assert "1 exchange" in out
+
+
+def test_debate_turns_off_nudges_and_injects_the_framing(cfg, monkeypatch):
+    """The whole point of the mode: a pure-prose turn is a valid answer, so it
+    hands agent.run stall/phantom nudges = 0 and the debate contract as
+    extra_system — not the work-run defaults."""
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")
+
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs)
+        class _R:  # noqa: D401 - minimal stand-in for RunResult
+            run_id, turns, aborted = 1, 1, False
+        return _R()
+
+    monkeypatch.setattr(cli.agent, "run", fake_run)
+    cli.cmd_debate(cfg, "reason with me")
+
+    assert seen["stall_nudges"] == 0
+    assert seen["phantom_nudges"] == 0
+    assert seen["extra_system"] is cli.DEBATE_FRAMING
+
+
+def test_debate_persona_command_edits_without_leaving_the_table(cfg, monkeypatch):
+    """`persona` mid-sitting opens the editor and loops — it must NOT be sent to
+    the agent as a message."""
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    lines = iter(["persona", "done"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(lines))
+
+    edited = {"count": 0}
+    monkeypatch.setattr(cli, "_edit_file", lambda p: edited.__setitem__("count", edited["count"] + 1))
+    monkeypatch.setattr(cli.agent, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("persona must not be sent to the agent")))
+
+    cli.cmd_debate(cfg, "")
+
+    assert edited["count"] == 1  # the editor opened exactly once
+
+
+def test_debate_busy_guard(cfg, capsys, monkeypatch):
+    project = cli._ensure_space(cfg)
+    go_state.start_entry(project.name, os.getpid(), kind="go")
+    monkeypatch.setattr(cli, "_prepare_run",
+                        lambda cfg: (_ for _ in ()).throw(
+                            AssertionError("must not prepare a run on a busy space")))
+
+    cli.cmd_debate(cfg, "hello")
+    assert "busy" in capsys.readouterr().out
+    go_state.clear_entry(project.name)
+
+
 def test_go_end_to_end_subprocess_smoke(cfg):
     """No Popen mocking: actually spawns `python -u -m hermes.go_worker` and
     waits for it to land, proving the real wiring (argv, log redirection,
