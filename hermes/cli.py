@@ -247,7 +247,8 @@ def cmd_run(cfg, args: str) -> None:
     go_state.start_entry(project.name, os.getpid(), kind="run")
     try:
         agent.run(project, args.strip(), cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
-                  on_run_started=lambda run_id, _run_dir: go_state.update_run_id(project.name, run_id))
+                  on_run_started=lambda run_id, _run_dir: go_state.update_run_id(project.name, run_id),
+                  background_housekeeping=True)
     finally:
         go_state.clear_entry(project.name)
 
@@ -317,11 +318,14 @@ def cmd_session(cfg, args: str) -> None:
                 max_run_seconds=int(remaining),
                 ask_operator_fn=ask_stdin,
                 on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+                background_housekeeping=True,
             )
             left = int(max(0, total - (time.monotonic() - started)) // 60)
             print(dim(f"— your turn — ~{left} min left in the session (`done` to end) —"))
     finally:
         go_state.clear_entry(project.name)
+    # Surface the last turn's background librarian work before handing back the prompt.
+    agent.flush_housekeeping()
     print(dim(f"— session ended — {exchanges} exchange(s) —"))
 
 
@@ -408,11 +412,14 @@ def cmd_debate(cfg, args: str) -> None:
                 ask_operator_fn=ask_stdin,
                 stall_nudges=0, phantom_nudges=0, extra_system=DEBATE_FRAMING,
                 on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+                background_housekeeping=True,
             )
             left = int(max(0, total - (time.monotonic() - started)) // 60)
             print(dim(f"— your turn — ~{left} min left at the table (`done` to end) —"))
     finally:
         go_state.clear_entry(project.name)
+    # Surface the last turn's background librarian work before leaving the table.
+    agent.flush_housekeeping()
     print(dim(f"— left the table — {exchanges} exchange(s) —"))
 
 
@@ -513,12 +520,15 @@ def cmd_improve(cfg, args: str) -> None:
                 ask_operator_fn=ask_stdin,
                 stall_nudges=0, phantom_nudges=0, extra_system=IMPROVE_FRAMING,
                 on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+                background_housekeeping=True,
             )
             left = int(max(0, total - (time.monotonic() - started)) // 60)
             print(dim(f"— your turn — ~{left} min left (`done` to end) —"))
     finally:
         cfg.set("self_build_enabled", prior_self_build, coerce=False)  # close the gate
         go_state.clear_entry(project.name)
+    # Surface the last turn's background librarian work before leaving the table.
+    agent.flush_housekeeping()
     print(dim(f"— left the table — {exchanges} exchange(s) — self-build gate closed —"))
 
 

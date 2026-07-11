@@ -425,7 +425,7 @@ def _outcomes_block(outcomes: list[dict]) -> str:
 
 
 def reflect_outcomes(project, backend, cfg, outcomes: list[dict], think_re=None,
-                      log=None) -> bool:
+                      log=None, narrate=print) -> bool:
     """The librarian's second job (feature 14): one bounded pass over this
     run's outcomes ledger — code-write/execution attempts paired with what was
     expected and what actually happened. Reads what really happened, forms a
@@ -468,7 +468,7 @@ def reflect_outcomes(project, backend, cfg, outcomes: list[dict], think_re=None,
                  "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
                                 for tc in result.tool_calls]})
         if shown:
-            print(magenta("  [librarian] ") + dim(shown.splitlines()[0][:120]))
+            narrate(magenta("  [librarian] ") + dim(shown.splitlines()[0][:120]))
         if not result.tool_calls:
             return banked
         msgs.append(_assistant_msg(result))
@@ -480,7 +480,7 @@ def reflect_outcomes(project, backend, cfg, outcomes: list[dict], think_re=None,
                 out = registry.dispatch(tc.name, tc.arguments, ctx)
                 if tc.name == "almanac_note" and not out.startswith(("ERROR", "DENIED")):
                     banked = True
-                    print(magenta("  (librarian banked an almanac entry)"))
+                    narrate(magenta("  (librarian banked an almanac entry)"))
             if log:
                 log({"role": "librarian-tool", "name": tc.name, "content": out})
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})
@@ -488,7 +488,7 @@ def reflect_outcomes(project, backend, cfg, outcomes: list[dict], think_re=None,
 
 
 def maybe_reflect_outcomes(project, backend, cfg, outcomes: list[dict], think_re=None,
-                           log=None) -> bool:
+                           log=None, narrate=print) -> bool:
     """Trigger at the end of every run (gated by the caller on
     `almanac_enabled`) — same every-run cadence as the card pass, but only
     when this run's outcomes actually include a mismatch worth explaining.
@@ -498,6 +498,7 @@ def maybe_reflect_outcomes(project, backend, cfg, outcomes: list[dict], think_re
     if not any(_looks_failed(o["actual"]) for o in outcomes):
         return False
     try:
-        return reflect_outcomes(project, backend, cfg, outcomes, think_re=think_re, log=log)
+        return reflect_outcomes(project, backend, cfg, outcomes,
+                                think_re=think_re, log=log, narrate=narrate)
     except LLMTransportError:
         return False
