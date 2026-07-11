@@ -134,6 +134,18 @@ def build_system_prompt(project: Project, env: dict, cfg: Config | None = None) 
                 "gotchas. After a task that took real figuring-out, capture what you "
                 "learned with `write_skill` (or update an existing skill).\n\n" + idx
             )
+    if cfg is not None and cfg.get("almanac_enabled", False):
+        from hermes import almanac as almanac_mod
+        idx = almanac_mod.index(int(cfg.get("almanac_index_chars", 1200)))
+        if idx:
+            system += (
+                "\n\n## Almanac — hypotheses from every project, not just this one\n\n"
+                "Each line is a theory of WHY something failed or succeeded, banked "
+                "by the librarian after a run where expected and actual didn't match. "
+                "`load_almanac(topic)` for the full writeup and evidence. Check it "
+                "before an approach that smells like one that's already gone wrong "
+                "somewhere else.\n\n" + idx
+            )
     guidance = (env.get("model_tool_guidance") or "").strip()
     if guidance:
         # Model-specific tool-calling discipline. Empty for the baseline model,
@@ -248,6 +260,10 @@ def compact_prompt() -> str:
 
 def retrospect_prompt() -> str:
     return _template("retrospect.md")
+
+
+def almanac_prompt() -> str:
+    return _template("almanac.md")
 
 
 def skills_nudge() -> str:

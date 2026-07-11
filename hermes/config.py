@@ -161,6 +161,16 @@ DEFAULTS: dict = {
     "catalog_sample_bytes": 1500,  # bytes of each file shown to the model during enrichment
     "catalog_scope": "workspace",  # every card's scope; a future shared lexicon flips this
     "catalog_digest_chars": 2000,  # budget for the card view injected into the package
+    # The almanac (feature 14): the librarian's second job. At the end of
+    # every run, when this run's code-write/execution attempts show a real
+    # mismatch between what was expected and what happened, a bounded pass
+    # forms a hypothesis for WHY — researching it with web_search/http_request
+    # (GET only) when useful — and banks it to a GLOBAL, cross-project store
+    # (unlike the workspace-scoped catalog above). On by default at the
+    # operator's explicit request — see DECISIONS.md.
+    "almanac_enabled": True,
+    "almanac_max_turns": 6,  # tool-call budget for one pass (research + the write)
+    "almanac_index_chars": 1200,  # budget for the almanac index in the system prompt
     "max_model_len": 0,  # 0 = pick automatically from detected VRAM
     "gpu_port": 8000,
     "local_port": 8000,

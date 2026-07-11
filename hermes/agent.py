@@ -55,6 +55,11 @@ EXECUTION_TOOLS = frozenset({
     "local_shell", "sandbox_shell", "remote_shell", "host_shell", "http_request",
 })
 
+# Tools tracked in the almanac's outcomes ledger (feature 14) — writing code
+# and running something are both "an attempt with a real result," the shape
+# the librarian's end-of-run pass reasons over.
+OUTCOME_TRACKED_TOOLS = CODE_WRITE_TOOLS | EXECUTION_TOOLS
+
 # Tools whose output enters context FROM THE NETWORK — i.e. untrusted data
 # (feature 8). When the Docker/browser sandbox lands, its runtime-output tools
 # join this set. Any turn whose immediate inputs came from one of these is
@@ -377,6 +382,13 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     last_guarded: dict | None = None
     blocked_repeats = 0
     escalation_sent = False
+    # The almanac (feature 14): the outcomes ledger. Every code-write/execution
+    # call this run, paired with whatever the model said it expected (this
+    # turn's own prose, if any — never fabricated) and what the tool actually
+    # returned. Fed to the librarian's end-of-run pass, not read mid-run —
+    # no double voice, one pass, at the end, like the catalog card pass.
+    almanac_on = cfg.get("almanac_enabled", False)
+    code_outcomes: list[dict] = []
     consecutive_errors = 0
     final_text = ""
     prev_shown = ""
@@ -537,6 +549,19 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     )
                     if fp is not None and _execution_failed(output):
                         attempt_failures[fp] = attempt_failures.get(fp, 0) + 1
+                if almanac_on and tc.name in OUTCOME_TRACKED_TOOLS:
+                    # "expected" is this turn's own visible prose, if any —
+                    # never invented. A tool call with no accompanying reasoning
+                    # honestly records an empty expectation; that's real signal
+                    # too, not a gap to paper over.
+                    outcome = {
+                        "turn": turns, "tool": tc.name,
+                        "call": _brief(tc.arguments),
+                        "expected": shown[:400] if shown else "",
+                        "actual": _brief(output, 400),
+                    }
+                    code_outcomes.append(outcome)
+                    log({"role": "outcome", **outcome})
                 if _is_tainting(tc.name, cfg) and not output.startswith(("ERROR", "DENIED")):
                     turn_produced_taint = True
                 log({"role": "tool", "name": tc.name, "content": output})
@@ -748,6 +773,21 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
             )
             if n_cards:
                 out(magenta(f"  (catalog — {n_cards} artifact card(s) updated)"))
+        except Exception:
+            pass  # the librarian is a convenience; never let it fail a run
+
+    # The librarian's second job (feature 14): when this run's code-write/
+    # execution attempts show a real mismatch between what was expected and
+    # what happened, reason about WHY — right here, once, at the end of the
+    # run, not mid-loop. log=log (unlike catalog enrichment above) because
+    # the operator explicitly wants this pass's reasoning kept, not hidden.
+    if almanac_on and not backend_dead:
+        from hermes import catalog as catalog_mod
+        try:
+            if catalog_mod.maybe_reflect_outcomes(
+                project, backend, cfg, code_outcomes, think_re=think_re, log=log,
+            ):
+                out(magenta("  (librarian — banked a hypothesis to the almanac)"))
         except Exception:
             pass  # the librarian is a convenience; never let it fail a run
     return RunResult(run_id, summary, final_text, turns, aborted)

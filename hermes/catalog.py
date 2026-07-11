@@ -29,12 +29,21 @@ live card per path; the superseded history is still on disk.
 Scope: every card carries a `scope` field ("workspace" today) so a future
 cross-workspace/shared lexicon is a flag flip, not a rewrite. The spanning
 machinery is intentionally NOT built yet — there is one workspace to catalog.
+
+The librarian has a second job, at the end of every run right alongside the
+card pass (feature 14): read this run's outcomes ledger — every code-write/
+execution attempt paired with what the model said it expected and what
+actually happened — and, when something doesn't add up, reason about WHY.
+That reasoning is banked to the almanac (hermes/almanac.py), the one store
+that IS cross-workspace: a shared, global lexicon of hypotheses, not files.
+See `reflect_outcomes` / `maybe_reflect_outcomes` below.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -376,3 +385,119 @@ def maybe_index(project, backend, cfg, run_id: int, think_re=None,
     if run_id % every != 0:
         return 0
     return index(project, backend, cfg, run_id, think_re=think_re, log=log)
+
+
+_EXIT_CODE_RE = re.compile(r"^exit code (\d+)")
+
+
+def _looks_failed(actual: str) -> bool:
+    """Cheap, deterministic gate for whether an outcome is worth a pass at
+    all — mirrors the stuck guard's own failure check. No LLM call spent just
+    to decide whether to spend an LLM call."""
+    if not actual:
+        return False
+    if actual.startswith(("ERROR", "DENIED")):
+        return True
+    m = _EXIT_CODE_RE.match(actual)
+    return bool(m) and m.group(1) != "0"
+
+
+def _outcomes_registry():
+    from hermes.tools import ToolRegistry, web, almanac_tools
+
+    registry = ToolRegistry()
+    for t in web.TOOLS:
+        registry.register(t)
+    for t in almanac_tools.WRITE_TOOLS:
+        registry.register(t)
+    return registry
+
+
+def _outcomes_block(outcomes: list[dict]) -> str:
+    blocks = []
+    for o in outcomes:
+        blocks.append(
+            f"turn {o['turn']} — {o['tool']}({o['call']})\n"
+            f"  expected: {o['expected'] or '(not stated)'}\n"
+            f"  actual:   {o['actual']}"
+        )
+    return "\n\n".join(blocks)
+
+
+def reflect_outcomes(project, backend, cfg, outcomes: list[dict], think_re=None,
+                      log=None) -> bool:
+    """The librarian's second job (feature 14): one bounded pass over this
+    run's outcomes ledger — code-write/execution attempts paired with what was
+    expected and what actually happened. Reads what really happened, forms a
+    hypothesis for WHY, may research it, and banks the finding to the almanac
+    (hermes/almanac.py) — shared across every project, unlike this module's
+    workspace-scoped cards. Returns True when it banked or refined an entry.
+
+    Same posture as retrospection: its own narrow registry, a confirm that
+    fails closed, never raises. The one deliberate difference is real network
+    reach (web_search, http_request GET) — safe by construction, because
+    http_request itself gates every non-GET/HEAD call through ctx.confirm, so
+    a confirm that always denies still lets read-only research through while
+    refusing anything that changes state on the web."""
+    from hermes import almanac as almanac_mod
+    from hermes import package
+    from hermes.agent import _assistant_msg, strip_think
+    from hermes.tools.base import ToolContext
+    from hermes.ui import dim, magenta
+
+    prompt = package.render(package.almanac_prompt(), {
+        "outcomes": _outcomes_block(outcomes),
+        "almanac_index": almanac_mod.index() or "(empty)",
+    })
+    registry = _outcomes_registry()
+    ctx = ToolContext(project=project, cfg=cfg, confirm=lambda *a, **k: False)
+    ctx.registry = registry
+    msgs = [{"role": "user", "content": prompt}]
+    if log:
+        log({"role": "librarian", "content": prompt[:4000]})
+    banked = False
+    for _ in range(max(1, int(cfg.get("almanac_max_turns", 6)))):
+        try:
+            result = backend.chat(msgs, tools=registry.schemas())
+        except LLMTransportError:
+            return banked
+        shown = strip_think(result.content, think_re) if think_re \
+            else strip_think(result.content)
+        if log:
+            log({"role": "librarian", "content": result.content,
+                 "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
+                                for tc in result.tool_calls]})
+        if shown:
+            print(magenta("  [librarian] ") + dim(shown.splitlines()[0][:120]))
+        if not result.tool_calls:
+            return banked
+        msgs.append(_assistant_msg(result))
+        for tc in result.tool_calls:
+            if tc.name == "finish_run":
+                out = ("Not here — this is the librarian's pass, not a run. "
+                       "Bank your finding with almanac_note, then stop calling tools.")
+            else:
+                out = registry.dispatch(tc.name, tc.arguments, ctx)
+                if tc.name == "almanac_note" and not out.startswith(("ERROR", "DENIED")):
+                    banked = True
+                    print(magenta("  (librarian banked an almanac entry)"))
+            if log:
+                log({"role": "librarian-tool", "name": tc.name, "content": out})
+            msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})
+    return banked
+
+
+def maybe_reflect_outcomes(project, backend, cfg, outcomes: list[dict], think_re=None,
+                           log=None) -> bool:
+    """Trigger at the end of every run (gated by the caller on
+    `almanac_enabled`) — same every-run cadence as the card pass, but only
+    when this run's outcomes actually include a mismatch worth explaining.
+    A failed pass is a no-op; the run's result already stands."""
+    if not outcomes:
+        return False
+    if not any(_looks_failed(o["actual"]) for o in outcomes):
+        return False
+    try:
+        return reflect_outcomes(project, backend, cfg, outcomes, think_re=think_re, log=log)
+    except LLMTransportError:
+        return False

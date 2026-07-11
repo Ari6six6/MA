@@ -428,6 +428,53 @@ to stop actually stops it.
 common. It only ever blocks *repeats* — a genuinely different command is never
 touched — so it costs nothing on runs that don't get stuck.
 
+### Feature 13 — Reflection nudge
+
+The stuck guard catches an *exact* repeated failure. This catches something
+softer and more common: a long chain of tool calls — failing or not, repeated
+or not — with no reasoning turn in between. When a run strings together
+`reflect_nudge_every` (default 4) tool-call turns with essentially no prose,
+one turn is spent forcing a pause: state what you expected, what the last
+tool result actually showed, whether they match, and whether the plan still
+holds. Bounded by `reflect_nudges` (default 3) per run.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `reflect_nudge_enabled` | `true` | turn the streak counter + pause on |
+| `reflect_nudge_every` | `4` | consecutive silent tool-call turns before pausing |
+| `reflect_nudges` | `3` | max forced pauses per run |
+
+On by default. It fires in `debate` mode too, on purpose — `debate` turns off
+`stall`/`phantom` nudges so pure reasoning is a valid turn, which is exactly
+where an unchecked chain of actions would otherwise slip through.
+
+### Feature 14 — The almanac
+
+At the end of every run, alongside the catalog card pass, the librarian looks
+at this run's outcomes ledger — every code-write/execution attempt paired
+with whatever was expected and what the tool actually returned. When one of
+those looks like a real mismatch (an error, a non-zero exit), a bounded pass
+reads what really happened, forms a hypothesis for WHY, may research it with
+`web_search`/`http_request` (GET only — read-only by construction), and banks
+the finding: a topic slug, a one-line claim, and the theory behind it.
+
+Unlike the catalog (one project's workspace) or skills (how-to procedures),
+the almanac is a single GLOBAL store — `~/.hermes/almanac.jsonl` — shared
+across every project. Its index rides in every system prompt the same way the
+skills index does; `load_almanac(topic)` pulls the full writeup, including any
+research, on demand.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `almanac_enabled` | `true` | outcomes ledger + the end-of-run pass + `load_almanac` |
+| `almanac_max_turns` | `6` | tool-call budget for one pass (research + the write) |
+| `almanac_index_chars` | `1200` | budget for the almanac index in the system prompt |
+
+On by default. It only fires when something actually looks wrong — a clean
+run costs nothing beyond the (already-logged) outcomes ledger. Writing an
+entry is exclusive to this pass, the same split the catalog uses for
+`catalog_note`: the doer doesn't curate its own long-term record mid-task.
+
 ## Static package budget (measured, 60K box)
 
 Keep an eye on the fixed block — it's sent on every single call:
@@ -462,6 +509,9 @@ verify_before_done     true     # don't report done without running it
 retrospect_enabled     true     # cross-run self-review every 5 runs
 stuck_guard_enabled    true     # mechanically block repeating a failed approach; recommended on smaller/local models
 # on already, leave them: checkpointing, directive_header_rule
+# also on already, at the operator's explicit request (the house default-off
+# rule's two exceptions, alongside checkpointing): reflect_nudge_enabled,
+# almanac_enabled — see DECISIONS.md Feature 13/14 if you want them off
 # always on, no flag: taint tracking (prompt-injection rail)
 ```
 
@@ -472,6 +522,8 @@ What stays default:
 - `checkpoint_max 20`
 - `retrospect_every_runs 5`, `retrospect_window 10`, `retrospect_max_turns 4`
 - `stuck_repeat_threshold 1`, `stuck_escalate_blocks 2`
+- `reflect_nudge_every 4`, `reflect_nudges 3`
+- `almanac_max_turns 6`, `almanac_index_chars 1200`
 
 Every one of these is reversible: flip the flag back and the behaviour is exactly
 what it was before. Nothing here changes on-disk formats without silent migration.

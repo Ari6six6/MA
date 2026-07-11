@@ -549,6 +549,78 @@ because agreeing was just tokens in context with no enforcement behind them.
   next person to discover a silent flag). Individually reversible with
   `config reflect_nudge_enabled false`.
 
+## Feature 14 — The almanac (the librarian's second job)
+
+Origin: the operator, immediately after Feature 13 shipped, drew a sharp line
+this codebase hadn't drawn yet — no more mid-loop voices ("no double voice in
+there"), but a real, non-negotiable requirement that every write/execution
+carry a stated expectation, and that *something* — the librarian, at the end
+of the loop, alongside the catalog pass — checks that expectation against what
+actually happened, forms a real hypothesis for WHY when they diverge, and
+banks it somewhere durable and shared, "like an almanac." Explicitly asked
+for research capability too: "he can go to the Internet."
+
+- **One pass, at the end, not a voice in the loop.** This is the direct answer
+  to "no discussion there, really." Feature 13 already pauses mid-run;
+  stacking a second, different mid-run mechanism on top would be exactly the
+  "double voice" the operator ruled out. The outcomes ledger is captured
+  during the loop (free — no LLM call, just harness bookkeeping alongside the
+  existing per-tool-call logging) but never READ until the run is over, at the
+  same point the catalog already runs its own end-of-run pass.
+- **Folded into `hermes/catalog.py`, not a new `librarian.py`.** The codebase
+  already calls that module's docstring "The librarian" (the catalog-card
+  pass). The operator described this new work as "the librarian... doing
+  something extra" at the exact same moment the catalog already fires — so
+  extending the module that already owns that name is truer to the ask than
+  inventing a second thing with the same name. `reflect_outcomes` /
+  `maybe_reflect_outcomes` sit beside `index` / `maybe_index` in one file; they
+  share no state, only the name and the moment they run.
+- **A dedicated global store, not a repurposed skill or catalog scope.**
+  Skills are procedures ("how"); the almanac is hypotheses ("why"). The
+  catalog's own docstring already named this gap — "a future cross-workspace/
+  shared lexicon is a flag flip, not a rewrite" — but a lexicon of causal
+  theories about outcomes doesn't fit a file card's shape (path, kind, tags).
+  `hermes/almanac.py` mirrors skills.py's *global* half only (no project
+  scope — the whole point is that a lesson learned in one project is visible
+  in every other one) with catalog.py's *append-only, superseding-card* shape
+  (a later run can refine a hypothesis without erasing the trail).
+- **Triggered by a cheap heuristic, not every run.** `_looks_failed` (an
+  ERROR/DENIED prefix or a non-zero `exit code N`) mirrors the stuck guard's
+  own failure check — no LLM call spent deciding whether to spend an LLM
+  call. A clean run's outcomes are still logged (cheap, always useful as an
+  audit trail) but never handed to the pass. Reflecting on WHY something
+  *succeeded* — the operator's other stated interest — is a real idea but not
+  built here: the trigger would need to be "this succeeded in a way worth
+  remembering," which is a much fuzzier bar than "this visibly broke," and
+  firing on every clean run would swamp the operator's attention budget for
+  no proportionate return. Left as a documented gap, not a silent omission.
+- **"Expected" is measured, never fabricated.** The ledger pairs a tool call
+  with whatever prose the model *actually* wrote that turn — empty if it wrote
+  none. An empty expectation is real, useful signal (this action had no stated
+  reasoning behind it at all) — the pass isn't told to invent one.
+- **Real network reach, the one deliberate difference from retrospection's
+  posture.** Retrospection's write surface is explicitly "no shells, no
+  network... self-improvement never touches the world." This pass is the
+  documented exception, because the operator was explicit and repeated about
+  it. It's safe by the same mechanism already in the codebase, not a new one:
+  `http_request` itself gates every non-GET/HEAD call through `ctx.confirm`,
+  and GET/HEAD `http_request`/`web_search` are already the unconditional
+  auto-run tier everywhere else in Hermes (see ARCHITECTURE_NOTES.md's
+  permission-tier table) — so a confirm that always denies (same as
+  retrospection's) still lets real, read-only research through while refusing
+  anything that changes state on the web. No new trust decision, just the one
+  that already existed, applied to an unattended pass.
+- **Writing is exclusive to this pass, like `catalog_note`.** `load_almanac`
+  is a normal read tool in the main registry; `almanac_note` only exists in
+  the pass's own narrow registry. The doer doesn't curate the cross-project
+  long-term record mid-task — same split, same reasoning, as the catalog.
+- **On by default (`almanac_enabled`) — the third exception to the house
+  rule.** Same shape as Feature 13: shipped, then the operator's explicit
+  real-time call to turn it on, not left as a flag to discover. The network
+  research is disclosed here precisely because it's the part most worth an
+  operator's informed consent even under an explicit "turn it on" — reversible
+  with `config almanac_enabled false`.
+
 ## Inner voice + waking the memory loop (Genesis session)
 
 - **Inner voice (`inner_voice`, on).** The model's `<think>` reasoning was already

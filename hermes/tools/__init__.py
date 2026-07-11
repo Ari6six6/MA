@@ -219,6 +219,15 @@ def build_registry(project, cfg, confirm_fn) -> ToolRegistry:
         for t in skills_tools.TOOLS:
             registry.register(t)
 
+    # The almanac (feature 14): load_almanac only — the read half. Writing a
+    # hypothesis is the librarian's end-of-run pass alone (hermes/catalog.py),
+    # the same split the catalog's own curation tool draws for retrospect.
+    if cfg.get("almanac_enabled", False):
+        from hermes.tools import almanac_tools
+
+        for t in almanac_tools.READ_TOOLS:
+            registry.register(t)
+
     # Delegation (feature 4): the delegate tool, only when enabled. A child's
     # tool set is drawn from this same registry, so it can never be broader.
     if cfg.get("delegate_enabled", False):
