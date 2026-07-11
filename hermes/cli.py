@@ -753,10 +753,11 @@ def cmd_gpu(cfg, args: str) -> None:
                 inst = instances[0]
             user, host, port = "root", inst["ssh_host"], int(inst["ssh_port"])
             instance_id = inst["id"]
-        ep = SSHEndpoint(host=host, port=port, user=user)
+        ep = SSHEndpoint(host=host, port=port, user=user, ephemeral=True)
         print(dim(f"checking ssh {user}@{host}:{port} ..."))
-        if not ep.check():
-            print(red("ssh check failed — is your key registered with Vast.ai?"))
+        ok, why = ep.check_detail()
+        if not ok:
+            print(red("ssh check failed") + dim(f" — {why}"))
             return
         ep.run(f"mkdir -p {ep.remote_workspace}")
         isolated = probe_net_isolation(ep)
@@ -877,11 +878,11 @@ def cmd_gpu(cfg, args: str) -> None:
             return
         # SSH host/port can change across a stop/start — always re-read them.
         user, host, port = "root", inst["ssh_host"], int(inst["ssh_port"])
-        ep = SSHEndpoint(host=host, port=port, user=user)
+        ep = SSHEndpoint(host=host, port=port, user=user, ephemeral=True)
         print(dim(f"checking ssh {user}@{host}:{port} ..."))
-        if not ep.check():
-            print(red("ssh check failed after resume")
-                  + dim(" — the box may still be booting; try `gpu up` again shortly"))
+        ok, why = ep.check_detail()
+        if not ok:
+            print(red("ssh check failed after resume") + dim(f" — {why}"))
             return
         ep.run(f"mkdir -p {ep.remote_workspace}")
         isolated = probe_net_isolation(ep)

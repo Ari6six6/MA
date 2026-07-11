@@ -46,4 +46,5 @@ def endpoint_from_state(state: dict):
         user=state.get("user", "root"),
         remote_workspace=state.get("remote_workspace", "~/hermes-workspace"),
         net_isolation=bool(state.get("net_isolation", False)),
+        ephemeral=True,  # a rented GPU box: recycled IPs, host key not pinned
     )
