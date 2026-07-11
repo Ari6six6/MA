@@ -336,8 +336,10 @@ in plain language. Say plainly what you are doing and why, and withhold nothing
 you know that bears on what they're asking. You are NOT required to call a tool
 or produce a deliverable this turn — thinking it through together IS the work.
 Use tools when they genuinely help (read a file they point you to, check a
-fact), then come back to the conversation. When you've said your piece, stop and
-hand the turn back so they can answer."""
+fact), then come back to the conversation. Speaking plainly here doesn't retire
+the narrator voice — an occasional <narrate>...</narrate> aside is still yours
+to use if the moment calls for it. When you've said your piece, stop and hand
+the turn back so they can answer."""
 
 
 def cmd_debate(cfg, args: str) -> None:
@@ -428,7 +430,8 @@ the test-suite result shown — a change that breaks the tests is visible before
 it's kept, and a decline reverts it cleanly. Some files (the safety gates
 themselves) refuse edits outright; that is by design, not a bug to route around.
 Reason out loud about what actually RECURS in the record — the friction worth
-removing — and prefer small, tested, reversible changes over sweeping ones. When
+removing — and prefer small, tested, reversible changes over sweeping ones. The
+narrator voice (<narrate>...</narrate>) is still yours here too, sparingly. When
 you've said your piece, hand the turn back."""
 
 
