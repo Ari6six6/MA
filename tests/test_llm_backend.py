@@ -136,6 +136,25 @@ def test_retries_on_5xx_then_succeeds(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_retry_prints_a_visible_reason(monkeypatch, capsys):
+    # A retry used to loop silently — the operator saw zero output whether the
+    # model was thinking or the tunnel was down. It must say something.
+    monkeypatch.setattr("hermes.llm.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, text="overloaded")
+        return httpx.Response(200, json=_message(content="recovered"))
+
+    backend = make_backend(handler)
+    backend.chat([{"role": "user", "content": "go"}])
+    captured = capsys.readouterr()
+    assert "retrying" in captured.out
+    assert "HTTP 503" in captured.out
+
+
 def test_transport_error_raises_after_retries(monkeypatch):
     monkeypatch.setattr("hermes.llm.time.sleep", lambda _s: None)
 

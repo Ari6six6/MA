@@ -20,7 +20,7 @@ import shlex
 from hermes.ssh import anchored_path, shell_path
 from hermes.tools._common import need_gpu
 from hermes.tools.base import obj_schema, tool
-from hermes.ui import dim
+from hermes.ui import dim, heartbeat
 
 # Installing/building software on the box is fine — these keep their network.
 PROVISION_RE = re.compile(
@@ -89,7 +89,8 @@ def remote_shell(args, ctx):
     timeout = min(int(args.get("timeout", 120)), 1800)
     cwd = shell_path(anchored_path(args.get("cwd") or "", ctx.gpu.remote_workspace))
     print(dim(f"  [gpu] $ {command}"))
-    rc, out, errout = ctx.gpu.run(f"cd {cwd} && {inner}", timeout=timeout)
+    with heartbeat(f"waiting on the GPU box (up to {timeout}s)"):
+        rc, out, errout = ctx.gpu.run(f"cd {cwd} && {inner}", timeout=timeout)
     body = (out or "") + (("\n[stderr]\n" + errout) if errout else "")
     return f"exit code {rc}\n{body.strip() or '(no output)'}"
 

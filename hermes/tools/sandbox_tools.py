@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 
 from hermes.tools.base import obj_schema, tool
-from hermes.ui import dim
+from hermes.ui import dim, heartbeat
 
 
 def _need_sandbox(ctx):
@@ -96,9 +96,10 @@ def sandbox_shell(args, ctx):
         except SandboxError as e:
             return f"ERROR: sandbox unavailable — {e}"
         print(dim(f"  [sandbox] $ {command}"))
-    rc, out, errout = sbx.exec_in_sandbox(
-        ctx.sandbox, name, command, runtime, cwd=args.get("cwd", ""), timeout=timeout
-    )
+    with heartbeat(f"running in the sandbox (up to {timeout}s)"):
+        rc, out, errout = sbx.exec_in_sandbox(
+            ctx.sandbox, name, command, runtime, cwd=args.get("cwd", ""), timeout=timeout
+        )
     body = (out or "") + (("\n[stderr]\n" + errout) if errout else "")
     result = f"exit code {rc}\n{body.strip() or '(no output)'}"
     if rc != 0 and _NETWORK_FAILURE_RE.search(body):
