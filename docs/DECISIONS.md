@@ -502,33 +502,20 @@ because agreeing was just tokens in context with no enforcement behind them.
   behavior, so it gets the same opt-in posture as everything else non-safety
   in this list.
 
-## Inner voice + waking the memory loop (Genesis session)
+## Feature 13 — Reflection nudge (the stop-and-think gate)
 
-- **Inner voice (`inner_voice`, on).** The model's `<think>` reasoning was already
-  stripped for display and the next turn's context; it is now also filed to
-  `runs/NNNN/thinking.jsonl` (and per-citizen at harvest). Write-only — captured but
-  never re-injected, so it cannot steer a run. "Let him talk to himself, but retrieve
-  everything."
-- **Waking the faculties.** `skills_enabled`, `skills_nudge`, `delegate_enabled`,
-  and `retrospect_enabled` now default **on**. The operator's "he's not building
-  skills" was exactly this: with the flags off, `write_skill`/`load_skill` were never
-  registered and the skills index never shown. (Summaries, by contrast, were always
-  written — `agent.py` writes `summary.md` unconditionally with a forced/stubbed
-  fallback; that complaint was a house not yet opened, not a missing feature.) Each
-  flag remains individually reversible.
-
-## Feature 12 — Reflection nudge (the stop-and-think gate)
-
-- **The problem it targets is narrower than "he needs an inner debate."** The
-  operator's report: a run strings together dozens of tool calls, agrees when
-  corrected, then repeats the mistake minutes later. Tracing it: `debate` mode
-  already turns off the act-or-finish pressure (`stall_nudges`/`phantom_nudges`
-  = 0) so pure reasoning is a valid turn — but nothing stops the opposite
-  failure, a chain of tool calls with *no* reasoning turn in between. That's
-  the concrete, harness-observable version of "no space for a new thought":
-  turn after turn of action with no checkpoint that compares what happened
-  against what was expected. This feature targets that specific gap, not a
-  general-purpose second personality.
+- **Landed independently of Feature 12, targeting a narrower slice of the same
+  complaint.** Both trace back to the same report — corrected, agrees, repeats
+  the mistake minutes later — but they catch different shapes of it. The
+  stuck-loop guard mechanically DENIES an *exact repeat of a failed attempt*
+  (same tool, same normalized command, already failed). This nudge catches
+  the softer, more common case underneath it: a chain of tool calls — failing
+  or not, repeated or not — with *no reasoning turn* in between, the "no space
+  for a new thought" pattern. A run can string together several different,
+  never-repeated, never-failing actions and still never once check whether any
+  of them matched what it expected. The guard wouldn't fire on that; this does.
+  They compose: the guard is the hard stop on a known-bad exact repeat, this is
+  the soft, general checkpoint that catches drift before it gets that far.
 - **A streak counter over turns, not a second model.** Multi-agent debate (a
   critic model, a second side-call per action) was the more literal reading of
   "he needs to argue with himself," and was rejected for cost: this harness
@@ -553,8 +540,26 @@ because agreeing was just tokens in context with no enforcement behind them.
   Same shape as `phantom_nudges`/`verify_rounds`: spend the budget, then let
   the run continue rather than nudging forever — a genuinely long silent
   streak shouldn't turn into an infinite loop of its own.
-- **Off by default (`reflect_nudge_enabled`).** Follows the house rule, not the
-  "waking the faculties" exception — that exception was for features already
-  silently present but gated off; this is new behavior on every run, including
-  ones the operator hasn't reviewed the resulting nudges from yet. Reversible
-  with `config reflect_nudge_enabled true`.
+- **On by default (`reflect_nudge_enabled`) — the second exception to the house
+  rule, granted the same way the first one was.** Shipped off by default first,
+  the same posture as every other opt-in feature; the operator then said
+  directly, in the same session, that they need it on now to actually use it —
+  the identical shape as "waking the faculties" (skills/delegate/retrospect
+  flipped on after the operator's explicit real-time call, not left for the
+  next person to discover a silent flag). Individually reversible with
+  `config reflect_nudge_enabled false`.
+
+## Inner voice + waking the memory loop (Genesis session)
+
+- **Inner voice (`inner_voice`, on).** The model's `<think>` reasoning was already
+  stripped for display and the next turn's context; it is now also filed to
+  `runs/NNNN/thinking.jsonl` (and per-citizen at harvest). Write-only — captured but
+  never re-injected, so it cannot steer a run. "Let him talk to himself, but retrieve
+  everything."
+- **Waking the faculties.** `skills_enabled`, `skills_nudge`, `delegate_enabled`,
+  and `retrospect_enabled` now default **on**. The operator's "he's not building
+  skills" was exactly this: with the flags off, `write_skill`/`load_skill` were never
+  registered and the skills index never shown. (Summaries, by contrast, were always
+  written — `agent.py` writes `summary.md` unconditionally with a forced/stubbed
+  fallback; that complaint was a house not yet opened, not a missing feature.) Each
+  flag remains individually reversible.

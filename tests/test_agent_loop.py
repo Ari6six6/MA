@@ -180,9 +180,21 @@ def _metrics(project, run_id=1):
     return json.loads(path.read_text())
 
 
-def test_reflect_nudge_off_by_default(project, cfg):
-    # Off by default: a long chain of silent tool-only turns is never bounced.
+def test_reflect_nudge_on_by_default(project, cfg):
+    # On by default (the operator's explicit call): a chain of silent tool-only
+    # turns reaching the default streak (4) gets bounced with no cfg.set at all.
     script = [{"tool": "write_note", "args": {"text": f"n{i}"}} for i in range(4)]
+    script.append({"tool": "finish_run", "args": {"summary": "done"}})
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    assert _metrics(project)["reflect_nudges"] == 1
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "Stop and think now" in transcript
+
+
+def test_reflect_nudge_can_be_disabled(project, cfg):
+    cfg.set("reflect_nudge_enabled", False)
+    script = [{"tool": "write_note", "args": {"text": f"n{i}"}} for i in range(6)]
     script.append({"tool": "finish_run", "args": {"summary": "done"}})
     result = run_agent(project, cfg, script)
     assert not result.aborted

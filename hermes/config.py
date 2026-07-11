@@ -39,14 +39,15 @@ DEFAULTS: dict = {
                                   # push a run past its wall-clock cap.
     "stall_nudges": 2,  # bounce prose-only turns back N times before accepting them as final
     "phantom_nudges": 1,  # bounce a finish that pasted code but wrote/ran nothing
-    # Reflection nudge (feature 12): the stop-and-think gate. Small models will
+    # Reflection nudge (feature 13): the stop-and-think gate. Small models will
     # chain tool call after tool call with no stated expectation or assessment
     # in between — "acting" without ever checking the result against what they
     # thought would happen. When a run strings together `reflect_nudge_every`
     # tool-call turns with no real prose, one turn is spent forcing a pause:
     # state what you expected, what actually happened, and whether the plan
-    # still holds. Off by default like every opt-in feature; see DECISIONS.md.
-    "reflect_nudge_enabled": False,
+    # still holds. On by default at the operator's explicit request — see
+    # DECISIONS.md ("the second exception to the house rule").
+    "reflect_nudge_enabled": True,
     "reflect_nudge_every": 4,  # consecutive silent tool-call turns before pausing
     "reflect_nudges": 3,  # max forced pauses per run — a backstop, not a cage
     "verify_code_runs": True,  # after a code task, an independent pass re-runs it in the sandbox

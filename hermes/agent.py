@@ -26,7 +26,7 @@ _THINK_TAG_RE = re.compile(r"</?(?:seed:)?think(?:ing)?>\s*", re.S)
 VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL)", re.I)
 MAX_CONSECUTIVE_ERRORS = 3
 
-# Reflection nudge (feature 12): a turn counts as "reflective" once its visible
+# Reflection nudge (feature 13): a turn counts as "reflective" once its visible
 # prose reaches this length — long enough to actually state an expectation or
 # assessment, short enough that an honest one-liner still counts. A turn under
 # this, even with tool calls attached, is treated as silent action.
@@ -220,7 +220,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     for this one call. `debate` sets both to 0 so a turn that's pure prose is
     accepted immediately instead of being bounced with "act or finish_run" —
     the difference between a work run and sitting at the table talking. The
-    reflection nudge (feature 12, `reflect_nudge_enabled`) is cfg-only, no
+    reflection nudge (feature 13, `reflect_nudge_enabled`) is cfg-only, no
     per-call override: it fires whenever the run strings together too many
     tool-call turns with no reflective prose, `debate` included — that is
     exactly the silent-chaining `debate` doesn't otherwise guard against,
@@ -345,7 +345,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     phantom_nudges_left = (
         cfg.get("phantom_nudges", 1) if phantom_nudges is None else phantom_nudges
     )
-    # Reflection nudge (feature 12): a bounded number of forced stop-and-think
+    # Reflection nudge (feature 13): a bounded number of forced stop-and-think
     # pauses when the run chains too many tool-only turns with no reflective
     # prose in between. Off by default (0 budget) like every opt-in feature.
     reflect_nudges_left = (
@@ -626,7 +626,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                         continue
                     out(green("  (verification PASSED — the code actually runs)"))
                 break
-            # Reflection nudge (feature 12): this turn made tool calls but didn't
+            # Reflection nudge (feature 13): this turn made tool calls but didn't
             # finish. Did it say anything real about what it expected or found, or
             # was it just another silent link in a chain of actions? Track the
             # streak; once it's long enough, spend one forced pause making the
