@@ -214,6 +214,46 @@ def test_llama_build_failure_only_hints_cuda_when_relevant(cfg):
     assert "CUDA toolkit" in str(exc.value)
 
 
+def test_launch_llama_wraps_clone_in_net_wait(cfg):
+    from conftest import FakeEndpoint
+    from hermes.models import get_spec
+
+    spec = get_spec("qwen")
+    ep = FakeEndpoint([
+        (0, "", ""),  # not running
+        (0, "", ""),  # build llama.cpp
+        (0, "", ""),  # mkdir workspace
+        (0, "", ""),  # launch
+    ])
+    launch(ep, cfg, plan_serve([("RTX 4090", 24564)], cfg, spec), spec)
+
+    build = ep.calls[1]
+    # A freshly booted box's DNS can lag the network coming up; the clone must
+    # retry transient resolution failures instead of dying on the first one.
+    assert "net_wait git clone --depth 1" in build
+    assert "&& git clone --depth 1" not in build  # unwrapped, raw clone
+
+
+def test_llama_build_failure_hints_network_when_dns_is_the_cause(cfg):
+    from conftest import FakeEndpoint
+    from hermes.models import get_spec
+
+    spec = get_spec("qwen")
+    plan = plan_serve([("RTX 4090", 24564)], cfg, spec)
+
+    # A DNS failure that outlasted the retry loop is a box-network problem, not
+    # a CUDA one — the hint must point at the real cause.
+    ep = FakeEndpoint([
+        (0, "", ""),
+        (1, "", "fatal: unable to access 'https://github.com/ggml-org/llama.cpp/': "
+                "Could not resolve host: github.com"),
+    ])
+    with pytest.raises(ProvisionError) as exc:
+        launch(ep, cfg, plan, spec)
+    assert "outbound network/DNS" in str(exc.value)
+    assert "CUDA toolkit" not in str(exc.value)
+
+
 def test_vllm_install_uses_apt_wait(cfg):
     from conftest import FakeEndpoint
 
