@@ -240,6 +240,73 @@ def test_catalog_reaches_the_reflection_pass(project, cfg):
     assert "same content" in seen["prompt"]  # the duplicate flag surfaced
 
 
+def test_annotate_flags_a_card_and_shows_in_digest(project, cfg):
+    write_ws(project, "scraper.py", "body")
+    catalog.index(project, None, cfg, run_id=1)
+    msg = catalog.annotate(project, "scraper.py",
+                           purpose="the one true scraper",
+                           flag="canonical — consolidate the copies here")
+    assert "annotated" in msg
+    log = catalog.read_entries(project)
+    assert len(log) == 2  # append-only: original card retained
+    live = catalog.current_entries(project)[0]
+    assert live["purpose"] == "the one true scraper"
+    assert live["source"] == "retrospect"
+    assert live["supersedes"] is not None
+    assert "consolidate" in catalog.digest(project)
+
+
+def test_annotate_refuses_unknown_path(project, cfg):
+    write_ws(project, "a.py", "x")
+    catalog.index(project, None, cfg, run_id=1)
+    assert catalog.annotate(project, "ghost.py", flag="x").startswith("ERROR")
+
+
+def test_annotate_empty_flag_clears_it(project, cfg):
+    write_ws(project, "a.py", "x")
+    catalog.index(project, None, cfg, run_id=1)
+    catalog.annotate(project, "a.py", flag="temporary")
+    assert "temporary" in catalog.digest(project)
+    catalog.annotate(project, "a.py", flag="")
+    assert "temporary" not in catalog.digest(project)
+
+
+def test_retrospect_registry_includes_catalog_note_when_on(cfg):
+    from hermes import retrospect
+    cfg.set("skills_enabled", False)
+    cfg.set("catalog_enabled", True)
+    assert "catalog_note" in retrospect.build_registry(cfg).names()
+    cfg.set("catalog_enabled", False)
+    assert "catalog_note" not in retrospect.build_registry(cfg).names()
+
+
+def test_retrospect_can_bank_a_catalog_annotation(project, cfg):
+    from hermes import retrospect
+    from hermes.llm import MockBackend
+    # two measured runs + a catalogued duplicate to react to
+    for rid in (1, 2):
+        run_dir = project.runs_dir / f"{rid:04d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "metrics.json").write_text(json.dumps({
+            "run": rid, "turns": 3, "aborted": False, "tool_calls": 1,
+            "tool_errors": 0, "stall_nudges": 0, "phantom_bounces": 0,
+            "verify_bounces": 0, "verify_failures": 0, "tainted_turns": 0,
+            "tools": ["write_file"],
+        }))
+        (run_dir / "summary.md").write_text("Did: things\n")
+    write_ws(project, "scraper.py", "body")
+    catalog.index(project, None, cfg, run_id=2)
+
+    backend = MockBackend([
+        {"tool": "catalog_note",
+         "args": {"path": "scraper.py",
+                  "flag": "canonical scraper — stop re-deriving it"}},
+        {"text": "that's the one worth fixing"},
+    ])
+    assert retrospect.retrospect(project, backend, cfg) is True
+    assert "canonical scraper" in catalog.digest(project)
+
+
 def test_catalog_off_by_config_writes_nothing(project, cfg):
     cfg.set("catalog_enabled", False)
     backend = MockBackend([

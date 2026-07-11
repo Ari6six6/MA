@@ -136,11 +136,15 @@ def test_retrospect_banks_a_note(project, cfg):
 
 def test_retrospect_registry_is_narrow(cfg):
     cfg.set("skills_enabled", False)  # on by default now; exercise the off path
+    cfg.set("catalog_enabled", False)  # on by default now; exercise the off path
     names = retrospect.build_registry(cfg).names()
-    assert names == ["write_note"]  # skills off -> only write_note
+    assert names == ["write_note"]  # both off -> only write_note
     cfg.set("skills_enabled", True)
     names = retrospect.build_registry(cfg).names()
     assert names == ["load_skill", "write_note", "write_skill"]
+    cfg.set("catalog_enabled", True)  # catalog adds exactly its curate tool
+    names = retrospect.build_registry(cfg).names()
+    assert names == ["catalog_note", "load_skill", "write_note", "write_skill"]
 
 
 def test_retrospect_writes_skill_when_skills_enabled(project, cfg, home):

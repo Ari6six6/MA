@@ -414,6 +414,111 @@ def cmd_debate(cfg, args: str) -> None:
     print(dim(f"— left the table — {exchanges} exchange(s) —"))
 
 
+# The self-improvement contract: like the debate contract, but pointed at the
+# machine itself. It tells the agent this sitting is about its OWN code, that the
+# whole record of what it has done is in view, and that edits are real but gated.
+IMPROVE_FRAMING = """\
+You are at the table with the operator, and this sitting is about YOU — the
+Hermes machinery you run on — not an outside task. Everything you have done is in
+view: your mission, your notes, your run summaries, and the WORKSPACE CATALOG of
+what you've produced. You can read your own source with list_hermes_source /
+read_hermes_source, and propose changes with write_hermes_source /
+edit_hermes_source. Every edit pauses for the operator's yes/no with the diff AND
+the test-suite result shown — a change that breaks the tests is visible before
+it's kept, and a decline reverts it cleanly. Some files (the safety gates
+themselves) refuse edits outright; that is by design, not a bug to route around.
+Reason out loud about what actually RECURS in the record — the friction worth
+removing — and prefer small, tested, reversible changes over sweeping ones. When
+you've said your piece, hand the turn back."""
+
+
+def cmd_improve(cfg, args: str) -> None:
+    """Sit at the table to work on Hermes ITSELF: same unhurried sitting as
+    `debate`, but the agent can read and edit its own source, every edit gated by
+    your y/n with the test suite run against it first (the scoreboard). Its whole
+    record — notes, run summaries, the workspace catalog — is in view, so "what
+    do you think needs improvement, looking at what you've done?" is a real
+    question it can answer from the evidence.
+
+    Self-build is turned on for THIS sitting only (not saved), so the gate closes
+    again when you get up. `done`/`exit`/Ctrl-C ends it."""
+    project = _ensure_space(cfg)
+    busy = go_state.active_entry(project.name)
+    if busy:
+        print(yellow(f"'{project.name}' is busy") + dim(
+            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
+        return
+    prepared = _prepare_run(cfg)
+    if prepared is None:
+        return
+    gpu, sandbox, env, backend = prepared
+
+    total = GO_MAX_RUN_SECONDS
+    started = time.monotonic()
+    mins = total // 60
+
+    def ask_stdin(_question: str) -> str:
+        try:
+            return input(magenta("  reply> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ""
+
+    # Open the self-build gate for this sitting only — remember the prior value
+    # and restore it on the way out, and never save(), so the gate is not left
+    # open on disk after you get up.
+    prior_self_build = cfg.get("self_build_enabled", False)
+    cfg.set("self_build_enabled", True, coerce=False)
+    tests_on = cfg.get("self_build_run_tests", True)
+
+    go_state.start_entry(project.name, os.getpid(), kind="improve")
+    print(dim(f"— working on Hermes itself in '{project.name}' — up to {mins} min. "
+              f"It can read + edit its own source; every edit needs your y/n "
+              f"{'with the test result shown' if tests_on else '(tests OFF)'}. "
+              f"`done` to get up. —"))
+    if not prior_self_build:
+        print(dim("  (self-build is on for this sitting only — it closes when "
+                  "you leave)"))
+    first = args.strip()
+    exchanges = 0
+    try:
+        while True:
+            remaining = total - (time.monotonic() - started)
+            if remaining <= 5:
+                print(dim(f"— the {mins} minutes are up — leaving the table —"))
+                break
+            if first:
+                msg, first = first, ""
+            else:
+                try:
+                    msg = input(magenta("you> ")).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+            low = msg.lower()
+            if low in ("done", "exit", "quit", "bye"):
+                break
+            if low in ("persona", "persona edit"):
+                _edit_file(persona_path())
+                continue
+            if not msg:
+                continue
+            exchanges += 1
+            agent.run(
+                project, msg, cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
+                max_run_seconds=int(remaining),
+                ask_operator_fn=ask_stdin,
+                stall_nudges=0, phantom_nudges=0, extra_system=IMPROVE_FRAMING,
+                on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+            )
+            left = int(max(0, total - (time.monotonic() - started)) // 60)
+            print(dim(f"— your turn — ~{left} min left (`done` to end) —"))
+    finally:
+        cfg.set("self_build_enabled", prior_self_build, coerce=False)  # close the gate
+        go_state.clear_entry(project.name)
+    print(dim(f"— left the table — {exchanges} exchange(s) — self-build gate closed —"))
+
+
 def cmd_go(cfg, args: str) -> None:
     """The one verb for a space: say something. Nothing running yet? It
     starts, and you watch it live. Something already running? What you typed
@@ -1385,6 +1490,7 @@ HELP_MORE = f"""\
 {cyan('go')} stop [space|all]   {bold('killswitch')} — stop a detached run dead {dim('(alias: stop)')}
 {cyan('go')} status             list what's running
 {cyan('debate')} [text]         sit at the table and reason it out — no "act or finish" pressure, pure talk {dim('(alias: d)')}
+{cyan('improve')} [text]        sit at the table to work on Hermes ITSELF — it reads/edits its own source, every edit gated + test-run {dim('(alias: i)')}
 {cyan('session')} [text]        sit WITH it in the foreground the whole time instead {dim('(alias: s)')}
 {cyan('run')} <text>            one foreground exchange, then back to the prompt {dim('(alias: r)')}
 
@@ -1412,13 +1518,15 @@ def dispatch(cfg, line: str) -> bool:
         return True
     cmd, _, rest = line.partition(" ")
     cmd = {"r": "run", "p": "project", "g": "gpu", "s": "session",
-           "d": "debate", "exit": "quit", "q": "quit"}.get(cmd, cmd)
+           "d": "debate", "i": "improve", "exit": "quit", "q": "quit"}.get(cmd, cmd)
     if cmd == "quit":
         return False
     elif cmd == "help":
         print(HELP_MORE if rest.strip() in ("more", "all", "full") else HELP)
     elif cmd == "debate":
         cmd_debate(cfg, rest)
+    elif cmd == "improve":
+        cmd_improve(cfg, rest)
     elif cmd == "session":
         cmd_session(cfg, rest)
     elif cmd == "go":

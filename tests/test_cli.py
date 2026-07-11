@@ -313,6 +313,60 @@ def test_session_uses_the_arg_as_the_first_message(cfg, capsys, monkeypatch):
     assert "1 exchange" in capsys.readouterr().out
 
 
+def test_improve_opens_self_build_for_the_sitting_then_closes_it(
+    cfg, capsys, monkeypatch
+):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    assert cfg.get("self_build_enabled") is False  # closed before
+
+    seen = {}
+
+    def fake_run(project, msg, cfg, backend, **kw):
+        # capture the gate state *during* the sitting
+        seen["during"] = cfg.get("self_build_enabled")
+        seen["framing"] = kw.get("extra_system")
+
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr(cli.agent, "run", fake_run)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")
+
+    cli.cmd_improve(cfg, "what needs improving?")
+
+    assert seen["during"] is True                       # gate open mid-sitting
+    assert "YOU" in seen["framing"]                      # the self-improve contract
+    assert cfg.get("self_build_enabled") is False        # gate closed again after
+    assert go_state.active_entry(cli.DEFAULT_SPACE) is None
+    assert "self-build gate closed" in capsys.readouterr().out
+
+
+def test_improve_restores_prior_self_build_setting(cfg, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.set("self_build_enabled", True)  # already on -> must stay on afterwards
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr(cli.agent, "run", lambda *a, **k: None)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")
+
+    cli.cmd_improve(cfg, "go")
+    assert cfg.get("self_build_enabled") is True
+
+
+def test_improve_busy_guard(cfg, capsys, monkeypatch):
+    project = cli._ensure_space(cfg)
+    go_state.start_entry(project.name, os.getpid(), kind="go")
+    called = {"prepare": False}
+    monkeypatch.setattr(cli, "_prepare_run",
+                        lambda cfg: called.__setitem__("prepare", True) or (None, None, {}, None))
+    cli.cmd_improve(cfg, "go")
+    assert called["prepare"] is False  # bailed on the busy space before preparing
+    assert "busy" in capsys.readouterr().out
+    go_state.clear_entry(project.name)
+
+
 def test_session_busy_guard(cfg, capsys, monkeypatch):
     project = cli._ensure_space(cfg)
     go_state.start_entry(project.name, os.getpid(), kind="go")

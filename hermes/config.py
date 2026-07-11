@@ -99,6 +99,14 @@ DEFAULTS: dict = {
     # project files — off by default, and even when on, a fixed denylist of
     # safety-critical files (the gates themselves) refuses edits regardless.
     "self_build_enabled": False,
+    # The scoreboard: when the agent edits Hermes' own source, run the test
+    # suite against the proposed change and show the operator the pass/fail
+    # result as part of the approval — so a self-edit is judged on evidence, not
+    # a diff read in the moment. The change is applied to disk, tested, and
+    # reverted if you decline. On by default whenever self-build is on.
+    "self_build_run_tests": True,
+    "self_build_test_cmd": "python -m pytest -q",  # how the scoreboard runs the suite
+    "self_build_test_timeout": 600,  # seconds before the test run is abandoned
     "auto_confirm": False,  # True: unattended mode — approve every y/n gate (local_shell, state-changing web, host writes, forged-tool loads) so a run never stalls waiting for an operator who's away
     "gpu_shell": False,  # False: GPU box is the model's host only; code runs in the air-gapped sandbox. True: also expose remote_shell/read/write for on-card compute
     "allow_gpu_network": False,  # only relevant when gpu_shell is on. False: box may install/build (net), but raw egress + target traffic go via the VPS; True: unrestricted box net

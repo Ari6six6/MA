@@ -34,6 +34,14 @@ def build_registry(cfg):
 
         for t in skills_tools.TOOLS:
             registry.register(t)
+    # The catalog card digest recirculates into every package, so a tool that
+    # curates it belongs in this narrow pass (same bar as notes/skills). Only
+    # when the catalog is on — otherwise its writes would never surface.
+    if cfg.get("catalog_enabled", True):
+        from hermes.tools import catalog_tools
+
+        for t in catalog_tools.TOOLS:
+            registry.register(t)
     return registry
 
 
@@ -119,11 +127,12 @@ def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
                        "calling tools when you're done.")
             else:
                 out = registry.dispatch(tc.name, tc.arguments, ctx)
-                if tc.name in ("write_note", "write_skill") and \
+                if tc.name in ("write_note", "write_skill", "catalog_note") and \
                         not out.startswith(("ERROR", "DENIED")):
                     banked = True
-                    print(magenta("  (retrospect banked a "
-                                  f"{'note' if tc.name == 'write_note' else 'skill'})"))
+                    kind = {"write_note": "note", "write_skill": "skill",
+                            "catalog_note": "catalog annotation"}[tc.name]
+                    print(magenta(f"  (retrospect banked a {kind})"))
             if log:
                 log({"role": "retrospect-tool", "name": tc.name, "content": out})
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})

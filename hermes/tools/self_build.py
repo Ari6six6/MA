@@ -24,6 +24,7 @@ the running process already has the old code imported.
 from __future__ import annotations
 
 import difflib
+import subprocess
 import time
 
 from hermes.paths import PathDenied, repo_root, resolve_in
@@ -68,6 +69,85 @@ def _protected_denial(path) -> str | None:
                 f"safety gates — self-build refuses to touch it regardless of "
                 f"config. Ask the operator to change it by hand.")
     return None
+
+
+def _run_tests(ctx) -> tuple[bool, str]:
+    """The scoreboard: run the test suite against the working tree as it stands
+    right now (the proposed edit already applied). Returns (passed, tail) where
+    tail is the last few lines of output. Never raises — a runner that itself
+    explodes is reported as a failure, not an exception into the tool."""
+    cfg = ctx.cfg
+    cmd = cfg.get("self_build_test_cmd", "python -m pytest -q")
+    timeout = int(cfg.get("self_build_test_timeout", 600))
+    try:
+        proc = subprocess.run(
+            cmd, shell=True, cwd=str(repo_root()),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"tests timed out after {timeout}s (`{cmd}`)"
+    except Exception as e:  # pragma: no cover - defensive
+        return False, f"could not run tests (`{cmd}`): {e}"
+    out = (proc.stdout or "") + (proc.stderr or "")
+    tail = "\n".join(out.strip().splitlines()[-8:]) or "(no test output)"
+    return proc.returncode == 0, tail
+
+
+def _gated_apply(path, new_text, ctx, prompt, diff, label) -> str:
+    """Shared write path for both self-build tools. When the scoreboard is on:
+    keep a backup, apply the change to disk, run the suite, then ask the
+    operator to approve WITH the test result in view — and revert cleanly if
+    they decline. When off: the original confirm-then-write behaviour.
+
+    Applying before the confirm is deliberate: the tests must run against the
+    real proposed file. The edit only takes effect on the next restart anyway,
+    and a decline restores the prior state (or removes a newly-created file), so
+    the working tree is never left changed without the operator's yes."""
+    existed = path.is_file()
+    old_text = path.read_text(errors="replace") if existed else ""
+    cfg = ctx.cfg
+    run_tests = bool(cfg.get("self_build_run_tests", True)) if cfg is not None else False
+
+    if not run_tests:
+        if not ctx.confirm(prompt, detail=_EFFECT_NOTE, viewable=diff):
+            return "DENIED by operator."
+        backup = _backup(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_text)
+        note = f" (backup: {backup})" if backup else ""
+        return _ok_msg(path, new_text, note, label)
+
+    backup = _backup(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_text)
+    passed, tail = _run_tests(ctx)
+    verdict = "PASS ✅" if passed else "FAIL ❌"
+    detail = (
+        f"{_EFFECT_NOTE}\n\nTESTS: {verdict}\n"
+        f"  $ {cfg.get('self_build_test_cmd', 'python -m pytest -q')}\n"
+        + "\n".join("  " + ln for ln in tail.splitlines())
+    )
+    if not ctx.confirm(prompt + f"  [tests: {verdict}]", detail=detail, viewable=diff):
+        # revert: restore prior contents, or remove a file we just created
+        if existed:
+            path.write_text(old_text)
+        else:
+            path.unlink(missing_ok=True)
+        return (f"DENIED by operator — change reverted (tests {verdict}). "
+                f"The proposed diff was not kept.")
+    note = f" (backup: {backup})" if backup else ""
+    return _ok_msg(path, new_text, note, label) + f" Tests {verdict} at approval time."
+
+
+_EFFECT_NOTE = ("This changes the harness itself, not the project. It takes "
+                "effect after you restart Hermes.")
+
+
+def _ok_msg(path, new_text, note, label) -> str:
+    if label == "edit":
+        return f"edited {_rel(path)}{note}. Restart Hermes for it to take effect."
+    return (f"wrote {len(new_text)} chars to {_rel(path)}{note}. Restart Hermes "
+            f"for it to take effect.")
 
 
 def _backup(path) -> str:
@@ -155,10 +235,11 @@ def read_hermes_source(args, ctx):
 
 @tool(
     "write_hermes_source",
-    "Create or overwrite a file in Hermes' OWN source tree. Always pauses for "
-    "the operator's y/n with the diff visible. A fixed set of safety-critical "
-    "files refuse this outright (see list_hermes_source's [protected] marks). "
-    "Takes effect only after the operator restarts Hermes.",
+    "Create or overwrite a file in Hermes' OWN source tree. The test suite is "
+    "run against your change and the pass/fail result is shown to the operator "
+    "with the diff for a y/n; a decline reverts it. A fixed set of safety-"
+    "critical files refuse this outright (see list_hermes_source's [protected] "
+    "marks). Takes effect only after the operator restarts Hermes.",
     obj_schema({"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
 )
 def write_hermes_source(args, ctx):
@@ -174,26 +255,20 @@ def write_hermes_source(args, ctx):
         old.splitlines(keepends=True), new.splitlines(keepends=True),
         fromfile=f"a/{_rel(path)}", tofile=f"b/{_rel(path)}",
     )) or "(new file, no prior content)"
-    if not ctx.confirm(
+    return _gated_apply(
+        path, new, ctx,
         f"agent wants to write HERMES' OWN SOURCE: {_rel(path)}",
-        detail="This changes the harness itself, not the project. It takes "
-               "effect after you restart Hermes.",
-        viewable=diff,
-    ):
-        return "DENIED by operator."
-    backup = _backup(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new)
-    note = f" (backup: {backup})" if backup else ""
-    return f"wrote {len(new)} chars to {_rel(path)}{note}. Restart Hermes for it to take effect; run the tests before you tell the operator it's safe."
+        diff, "write",
+    )
 
 
 @tool(
     "edit_hermes_source",
     "Replace an exact string in a file in Hermes' OWN source tree. `old` must "
-    "occur exactly once. Always pauses for the operator's y/n with the diff "
-    "visible. A fixed set of safety-critical files refuse this outright. "
-    "Takes effect only after the operator restarts Hermes.",
+    "occur exactly once. The test suite is run against your change and the "
+    "pass/fail result is shown to the operator with the diff for a y/n; a "
+    "decline reverts it. A fixed set of safety-critical files refuse this "
+    "outright. Takes effect only after the operator restarts Hermes.",
     obj_schema(
         {
             "path": {"type": "string"},
@@ -223,17 +298,11 @@ def edit_hermes_source(args, ctx):
         old_text.splitlines(keepends=True), new_text.splitlines(keepends=True),
         fromfile=f"a/{_rel(path)}", tofile=f"b/{_rel(path)}",
     ))
-    if not ctx.confirm(
+    return _gated_apply(
+        path, new_text, ctx,
         f"agent wants to edit HERMES' OWN SOURCE: {_rel(path)}",
-        detail="This changes the harness itself, not the project. It takes "
-               "effect after you restart Hermes.",
-        viewable=diff,
-    ):
-        return "DENIED by operator."
-    backup = _backup(path)
-    path.write_text(new_text)
-    note = f" (backup: {backup})" if backup else ""
-    return f"edited {_rel(path)}{note}. Restart Hermes for it to take effect; run the tests before you tell the operator it's safe."
+        diff, "edit",
+    )
 
 
 TOOLS = [list_hermes_source, read_hermes_source, write_hermes_source, edit_hermes_source]

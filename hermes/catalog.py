@@ -300,6 +300,45 @@ def index(project, backend, cfg, run_id, think_re=None, log=None) -> int:
     return len(cards)
 
 
+def annotate(project, path: str, *, purpose: str | None = None,
+             tags: list | None = None, flag: str | None = None,
+             run=0, source: str = "retrospect") -> str:
+    """Append a superseding card for an existing artifact, carrying reflection's
+    improvements: a sharper purpose, tags, or a `flag` (a short recommendation
+    like 'duplicate of scraper.py — consolidate' that then shows in the digest).
+
+    Append-only like every other card: the prior card stays on disk, this one
+    supersedes it and is stamped with `source` so a human can see the catalog
+    was edited by the reflection pass, not by a file write. Returns a status
+    string; refuses a path that has no live card (reflection annotates what is
+    actually catalogued, it does not invent entries)."""
+    live = {e.get("path"): e for e in current_entries(project)}
+    prior = live.get(path)
+    if prior is None:
+        return (f"ERROR: no catalogued artifact at '{path}'. Annotate a path "
+                f"that appears in the catalog.")
+    card = dict(prior)
+    short = str(prior.get("sha", "")).split(":")[-1][:10]
+    card["id"] = f"{time.strftime('%Y%m%d-%H%M%S')}-{short}"
+    card["supersedes"] = prior.get("id")
+    card["ts"] = time.strftime("%Y-%m-%d %H:%M")
+    card["run"] = run
+    card["source"] = source
+    if purpose is not None:
+        card["purpose"] = str(purpose).strip()[:200]
+    if tags is not None:
+        card["tags"] = [str(t).strip().lower()[:24] for t in list(tags)[:6]
+                        if str(t).strip()]
+    if flag is not None:
+        flag = str(flag).strip()
+        if flag:
+            card["flag"] = flag[:200]
+        else:
+            card.pop("flag", None)  # empty flag clears it
+    _append_entries(project, [card])
+    return f"annotated '{path}'."
+
+
 def digest(project, max_chars: int = 2000) -> str:
     """The always-present view for the package: one line per live card, richest
     first (cards with a purpose lead). Empty string when there is no catalog yet
@@ -316,6 +355,8 @@ def digest(project, max_chars: int = 2000) -> str:
             bits.append("— " + e["purpose"])
         if e.get("duplicate_of"):
             bits.append(f"(same content as {e['duplicate_of']})")
+        if e.get("flag"):
+            bits.append(f"⚑ {e['flag']}")
         if tags:
             bits.append(f"#{tags}")
         line = " ".join(bits)

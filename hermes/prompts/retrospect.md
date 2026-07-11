@@ -51,6 +51,10 @@ concrete fix:
   available to you in this pass.)
 - `write_note` when the fix is a fact or standing reminder your future
   packages should carry.
+- `catalog_note` when the problem is a specific FILE: sharpen its purpose, or
+  raise a flag on it (e.g. "duplicate of scraper.py — consolidate") so the
+  recommendation rides beside that file in every future package. (Only when
+  the catalog is available to you in this pass.)
 
 Rules: every conclusion must trace to the data above — no invented problems,
 no self-congratulation. One or two high-value writes beat many. You cannot
