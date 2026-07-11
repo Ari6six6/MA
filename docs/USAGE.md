@@ -354,6 +354,29 @@ doesn't get cut off mid-task, set `max_run_seconds` (and, if delegation is on,
 meaning much once turns are cheap and the model is fast; time is what's
 actually metered on the box you're renting.
 
+### The LLM call timeout (a different layer entirely)
+
+`max_run_seconds`/`delegate_max_seconds` above bound a whole RUN across many
+model calls. `llm_timeout` bounds ONE HTTP call — the httpx read/connect/write/
+pool timeout in `OpenAIBackend`. It matters most for the calls that happen
+*outside* the visible turn loop and get no on-screen warning before they start:
+retrospection, the catalog pass, and the almanac reflection pass all make their
+own model calls after `[run NNNN complete]` has already printed. On a slow box
+or with a big prompt (a large retrospection window, a big file sampled for
+catalog enrichment), the old fixed 300s could cut off a completion that was
+genuinely still working, which then gets retried (`RETRY_DELAYS = (1, 3, 8)`,
+4 attempts total) and redone from scratch each time rather than picked back up.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `llm_timeout` | `300` | seconds before one model HTTP call is abandoned and retried |
+
+Raise it (`config set llm_timeout 900`, or higher) if you keep seeing the same
+call time out two or three retries in a row on a legitimately slow box — that
+pattern means the call needed more room, not that the connection is dead. A
+connection that's *actually* dead (a dropped SSH tunnel) fails the same way
+either way, just after a longer wait before the harness gives up on it.
+
 ### Feature 9 — Retrospection (cross-run self-improvement)
 
 The skills nudge reflects on one run while it's still in context. Retrospection
