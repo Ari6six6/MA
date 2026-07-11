@@ -55,6 +55,13 @@ def test_check_detail_reports_timeout_and_missing_binary():
     assert not ok and "openssh" in why
 
 
+def test_check_detail_reports_transient_reset_as_retry():
+    ep = _stub(SSHEndpoint(host="h", port=1), 255,
+               err="kex_exchange_identification: Connection reset by peer")
+    ok, why = ep.check_detail()
+    assert not ok and "run it again" in why
+
+
 def test_check_detail_ok():
     ok, why = _stub(SSHEndpoint(host="h", port=1), 0, out="HERMES_OK\n").check_detail()
     assert ok and why == "ok"

@@ -184,6 +184,11 @@ class SSHEndpoint:
         if "permission denied" in low or "no such identity" in low:
             return False, ("auth denied — this box isn't accepting your SSH key "
                            "(is your key registered with Vast.ai?)")
+        if ("reset by peer" in low or "broken pipe" in low
+                or "closed by remote host" in low
+                or "kex_exchange_identification" in low):
+            return False, ("the ssh link dropped mid-handshake (flaky link, or the "
+                           "box is still warming up) — just run it again")
         if "connection refused" in low:
             return False, "connection refused — sshd isn't up yet; the box is still booting"
         if ("connection timed out" in low or "operation timed out" in low
