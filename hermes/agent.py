@@ -153,7 +153,8 @@ def _normalize(text: str) -> str:
 
 def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         sandbox=None, quiet=False, max_run_seconds=None, inbox_path=None,
-        on_run_started=None, show_thinking=False, ask_operator_fn=None):
+        on_run_started=None, show_thinking=False, ask_operator_fn=None,
+        stall_nudges=None, phantom_nudges=None, extra_system=None):
     """Execute one agent run. `env` carries gpu_status / remote_workspace /
     context_window for the package; `gpu` is an SSHEndpoint or None; `sandbox` is
     the VPS sandbox-host SSHEndpoint (the air-gapped exec container) or None.
@@ -175,7 +176,13 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     `ask_operator_fn(question) -> reply`, when given, is the foreground-session
     channel for the `ask_operator` tool: the operator is at the keyboard, so the
     tool reads their answer directly instead of polling the inbox. Providing it
-    (or `inbox_path`) is what makes `ask_operator` available at all."""
+    (or `inbox_path`) is what makes `ask_operator` available at all.
+    `stall_nudges` / `phantom_nudges`, when given, override cfg's nudge counts
+    for this one call. `debate` sets both to 0 so a turn that's pure prose is
+    accepted immediately instead of being bounced with "act or finish_run" —
+    the difference between a work run and sitting at the table talking.
+    `extra_system`, when given, is appended to this run's system prompt (a
+    per-mode framing, e.g. the debate contract) without touching persona.md."""
     out = (lambda *a, **k: None) if quiet else print
     if confirm_fn is None:
         from hermes.confirm import confirm as confirm_fn
@@ -244,6 +251,8 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
             log({"role": "directives", "content": project.read_directives()})
 
     messages = package.assemble(project, prompt, env, cfg)
+    if extra_system and messages and messages[0].get("role") == "system":
+        messages[0]["content"] += "\n\n" + extra_system.strip()
     project.append_history(run_id, prompt)
     for m in messages:
         log({"role": m["role"], "content": m["content"][:200000]})
@@ -288,8 +297,10 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     # its blocking wait and never push the run past its budget.
     ctx.run_deadline = run_started + max_run_seconds if max_run_seconds else None
     time_wrapup_sent = False
-    nudges_left = cfg.get("stall_nudges", 2)
-    phantom_nudges_left = cfg.get("phantom_nudges", 1)
+    nudges_left = cfg.get("stall_nudges", 2) if stall_nudges is None else stall_nudges
+    phantom_nudges_left = (
+        cfg.get("phantom_nudges", 1) if phantom_nudges is None else phantom_nudges
+    )
     # Verification enforcement (feature 7): a one-shot nudge when a file-mutating
     # run finishes without having executed anything. Cheap, no sandbox needed.
     verify_before_done_left = 1 if cfg.get("verify_before_done", False) else 0
