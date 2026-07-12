@@ -160,6 +160,31 @@ def test_qwen_serves_on_native_llama_cpp(cfg):
     assert "--n-gpu-layers" in cmd
 
 
+def test_glm_serves_fp16_gguf_on_llama_cpp(cfg):
+    from hermes.models import get_spec
+
+    spec = get_spec("glm")
+    assert spec.server == "llama_cpp"  # FP16 GGUF → native runtime, not vLLM
+    assert spec.supports_forced_tool_choice is False  # llama.cpp under --jinja
+    # ~62GB of FP16 weights → needs a big box; serve it on an H200-class card.
+    plan = plan_serve([("NVIDIA H200", 143771)], cfg, spec)
+    cmd = llama_command(cfg, plan, spec)
+    assert cmd.startswith(f"{LLAMA_BIN} ")
+    assert "--hf-repo HauhauCS/GLM-4.7-Flash-Uncensored-HauhauCS-Balanced" in cmd
+    # exact FP16 filename, not a quant tag → --hf-file, not -hf repo:QUANT
+    assert "--hf-file GLM-4.7-Flash-Uncensored-HauhauCS-Balanced-FP16.gguf" in cmd
+    assert "--jinja" in cmd  # OpenAI tool calls from GLM's own chat template
+    assert "--alias glm-4.7-flash" in cmd
+
+
+def test_glm_too_small_box_rejected(cfg):
+    # A single 48GB card is well below the ~62GB FP16 floor.
+    from hermes.models import get_spec
+
+    with pytest.raises(ProvisionError):
+        plan_serve([("RTX 6000 Ada", 49140)], cfg, get_spec("glm"))
+
+
 def test_launch_llama_builds_with_cuda_then_serves(cfg):
     from conftest import FakeEndpoint
     from hermes.models import get_spec
