@@ -241,8 +241,16 @@ def _install_llama(endpoint) -> None:
         "git cmake build-essential libcurl4-openssl-dev && "
         f"rm -rf {LLAMA_DIR}/src && "
         f"net_wait git clone --depth 1 {LLAMA_REPO} {LLAMA_DIR}/src && "
+        # Build CUDA kernels only for the GPU actually on the box, not the whole
+        # architecture matrix llama.cpp compiles by default — the difference is
+        # tens of minutes of nvcc on a first serve. `compute_cap` like "9.0"
+        # (Hopper/H200) → "90" for CMAKE_CUDA_ARCHITECTURES. If the probe finds
+        # nothing, the flag drops out and llama.cpp's default arch list stands.
+        "CUDA_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader "
+        "2>/dev/null | head -1 | tr -d '. '); "
         f"cmake -S {LLAMA_DIR}/src -B {LLAMA_DIR}/src/build "
-        "-DGGML_CUDA=ON -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release && "
+        "-DGGML_CUDA=ON -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release "
+        "${CUDA_ARCH:+-DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH} && "
         f"cmake --build {LLAMA_DIR}/src/build --config Release -j --target llama-server && "
         f"cp {LLAMA_DIR}/src/build/bin/llama-server {LLAMA_BIN}"
     )

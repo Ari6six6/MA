@@ -200,6 +200,10 @@ def test_launch_llama_builds_with_cuda_then_serves(cfg):
 
     build = ep.calls[1]
     assert "llama.cpp" in build and "GGML_CUDA=ON" in build
+    # Build only for the box's own GPU arch, not llama.cpp's whole default
+    # matrix — that's the difference between a ~5-min and a ~30-min first serve.
+    assert "nvidia-smi --query-gpu=compute_cap" in build
+    assert "-DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH" in build
     assert VENV_DIR not in build  # the native build, not the vLLM venv
     # apt-get runs through the lock-wait wrapper, not raw, so a freshly booted
     # box's cloud-init/unattended-upgrades apt lock gets retried instead of
