@@ -35,8 +35,9 @@ the Master's every word** (always — Rule 2), contextualizes it, consults the
 General. He **never addresses the Master.** He may address the General (usually) or
 the Warrior (§3), or think privately. His gift and his risk: he sees what others
 can't, including things that aren't there — so the General audits him (§5). Absorbs
-the old librarian/almanac (the *why*). **He writes the Chant** (§6.5). **Never leaves
-the dome.**
+the old librarian/almanac (the *why*). **He writes the Chant** (§6.5) **and keeps the
+Theory of the World** (§9) — the map of everywhere the realm has reached. **Never
+leaves the dome.**
 
 **The General** — wakes **second**. The Master's first lieutenant, and the **only**
 one who talks with the Master — reporting, asking, and **escalating for permission**
@@ -139,7 +140,8 @@ world, private mind.
 ## 6. Morning routines (the wake-order is forced, not flavor)
 
 - **Wizard (first):** reads what carried over (the Chant, his walls), reads what's
-  inside, synthesizes the state of the realm — his first words in the Hall.
+  inside, folds the Warrior's latest reports into the Theory of the World (§9), and
+  synthesizes the state of the realm — his first words in the Hall.
 - **General (second):** reads the Wizard's synthesis, audits it, reconciles it with
   the standing strategy and the Theory of the World, forms the day's agenda, greets
   the Master.
@@ -201,17 +203,22 @@ General → Warrior → gate → web → back → report → General
 
 ---
 
-## 9. The Theory of the World — cartography of the outside *(teaser / future)*
+## 9. The Theory of the World — the Wizard's map of the outside
 
-The realm should hold **a theory of the outside world** — a map of the internet it
-has actually touched. When the Warrior goes somewhere, the realm remembers the plain
-facts: **IP address, domain, paths/filesystem, subdomains hit**; if services **share
-an IP**, that's known; services touched every few days are **mapped by cadence**; and
-for each, *what we do with them and what usually comes back* — our relationship to
-them. Plain JSON. Crucially, **this is data the Warrior already collects** in his
-return report (§1) — the Theory of the World is just its **synthesis into a persistent
-map**, and keeping that map honest is part of the General's strategy work. A small,
-high-value feature to build once the spine stands.
+The realm holds **a theory of the outside world** — a map of the internet it has
+actually touched, and **it is the Wizard's to keep.** When the Warrior goes somewhere,
+the realm remembers the plain facts: **IP address, domain, paths/filesystem, subdomains
+hit**; if services **share an IP**, that's known; services touched every few days are
+**mapped by cadence**; and for each, *what we do with them and what usually comes back*
+— our relationship to them. Plain JSON.
+
+The Warrior **gathers** it (it's already in his return report, §1); the **Wizard
+cartographs** it — folding each fresh report into the persistent map at dawn (§6),
+because seeing the shape of a world others only touch piecemeal is exactly the seer's
+gift. The **General reads** it for strategy. So the flow mirrors the whole realm: the
+arm brings raw ground-truth home, the seer turns it into a map, the strategist plans
+on it. A high-value feature to build once the spine stands — the Wizard's second
+artifact, beside the Chant.
 
 ---
 
@@ -242,7 +249,8 @@ behind `village_enabled`).
 4. **The Chant** — the Wizard's dusk song, auto-posted at dawn.
 5. **The two walls** — the dusk ritual; bodies die nightly, walls persist and re-mount.
 
-*Then, on top of the spine: the Theory of the World (§9).*
+*Then, on top of the spine: the **Theory of the World** (§9) — the Wizard's map,
+cartographed from the Warrior's reports, read by the General for strategy.*
 
 **Discipline (the operator's own laws):** make roles real in-process first (cheap,
 testable); reach for real containers only where isolation or true egress-gating needs
