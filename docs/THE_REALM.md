@@ -52,7 +52,10 @@ departure and return.** On return he gives the General a **detailed report — a
 all, everything he touched outside** (which becomes the Theory of the World, §9).
 Any external access that is *not* the Warrior is, by definition, a detectable leak.
 
-*(Real names come later, written into each persona. For now: Wizard, General,
+*(Real names come later, written into each persona. And a persona is a **living
+seed, not a static sheet**: the Master writes who each one starts as, and the walls
+(§7) evolve it — every night an inhabitant rewrites its own self-image, so who they
+are drifts with what they live. For now they are what they are: Wizard, General,
 Warrior.)*
 
 ---
