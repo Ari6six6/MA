@@ -295,13 +295,18 @@ GLM = ModelSpec(
     ),
     min_total_gb=66,  # ~62GB of FP16 weights + KV/overhead; an 80GB card just fits
     max_model_len=131072,  # GLM-4.7-Flash's native 128K context
+    # Tiers are total-VRAM brackets, not a live free-VRAM calc, so they carry a
+    # safety margin: after ~62GB of FP16 weights, KV runs ~190KB/token (plus a
+    # few GB of llama.cpp compute buffers). The brackets stay a notch below what
+    # the arithmetic allows, both for that buffer and because GLM's exact KV-head
+    # count is estimated — an under-estimate must not OOM the box.
     context_tiers=[
-        (84, 16384),   # single 80GB card: weights eat ~62GB, KV gets the rest
-        (100, 32768),  # ~96GB (two 48GB or one 96GB): more room for context
-        (144, 65536),  # H200-class single card
-        (200, 98304),  # two big cards
+        (80, 16384),   # ~70-79GB: only just clears the ~62GB weights — keep tight
+        (88, 32768),   # single 80GB card (~80): ~18GB free after weights
+        (100, 65536),  # ~88-99GB (H100 NVL 93, 96GB cards): comfortable KV headroom
+        (120, 98304),  # ~100-119GB: lots of room
     ],
-    context_beyond=131072,
+    context_beyond=131072,  # ~120GB+ (H200 and up): the full native 128K
     weights_note="first run downloads the ~62GB FP16 GGUF",
     served_name="glm-4.7-flash",
     server="llama_cpp",

@@ -177,6 +177,18 @@ def test_glm_serves_fp16_gguf_on_llama_cpp(cfg):
     assert "--alias glm-4.7-flash" in cmd
 
 
+def test_glm_context_scales_with_a_bigger_card(cfg):
+    from hermes.models import get_spec
+
+    spec = get_spec("glm")
+    # H100 NVL (~93GB): comfortably past the ~62GB weights → 65K, not the old 32K.
+    assert plan_serve([("NVIDIA H100 NVL", 95830)], cfg, spec).max_model_len == 65536
+    # An 80GB card stays tighter — weights leave ~18GB for KV.
+    assert plan_serve([("NVIDIA A100-SXM4-80GB", 81920)], cfg, spec).max_model_len == 32768
+    # H200-class (~140GB): the full native 128K context.
+    assert plan_serve([("NVIDIA H200", 143771)], cfg, spec).max_model_len == 131072
+
+
 def test_glm_too_small_box_rejected(cfg):
     # A single 48GB card is well below the ~62GB FP16 floor.
     from hermes.models import get_spec
