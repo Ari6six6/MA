@@ -21,6 +21,10 @@ reaches:
 
 ### ▶ Start here
 
+Already set up and just want to use it? **[docs/QUICKSTART.md](docs/QUICKSTART.md)**
+is the whole program on one page: one verb (`go`), the GPU, the mission, and where
+your files live.
+
 New, or setting up a box from scratch? **[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**
 is the A-to-Z: fresh VPS → first run, in order, from a phone over SSH. The rest of
 this README is reference.
@@ -75,6 +79,10 @@ config file; **full reference and recommended 60K settings in
 | **Self-build** | Lets the agent read and edit **Hermes' own source**, not just the project — gated tighter than everything else: every write asks y/n with a diff, and a fixed set of files (the gates themselves) refuse edits no matter what. | off |
 | **Time-boxed runs** | A wall-clock hard stop (`max_run_seconds`), independent of the turn count — the safety net that still bounds a run when `max_turns` is raised or removed for autopilot use. `delegate_max_seconds` does the same for one delegated child. | off |
 | **Retrospection** | Every N runs, a fresh-context pass reviews harness-recorded per-run metrics (turns, aborts, errors, bounces — numbers the model can't embellish) plus its own summaries, and banks recurring lessons as notes/skills. The recursive self-improvement loop, grounded and bounded. | **on** |
+| **Stuck-loop guard** | Repeating an execution attempt that already failed this run — even reworded — is mechanically `DENIED` before it runs, not just discouraged; a live `veto` (via `go say`) hard-blocks whatever was just attempted, instantly. Enough blocked repeats force a one-shot nudge to name a genuinely different approach. The fix for "agreed to stop, then did it anyway" — the correction has teeth now. | off |
+| **Reflection nudge** | After too many tool-call turns in a row with no reasoning in between, one turn is spent forcing a pause: what did you expect, what actually happened, does the plan still hold. Catches the softer, more common failure the stuck guard doesn't — silent drift, not just an exact repeated failure. | **on** |
+| **The almanac** | At the end of every run, the librarian checks this run's expected-vs-actual outcomes; where they diverge, a bounded pass forms a real hypothesis for WHY (researching it with `web_search`/read-only `http_request` when useful) and banks it to a store shared across **every project**, not just this one — an index in every system prompt, the full writeup via `load_almanac`, and a memo of what's new since this project's last run placed right next to the current request so a fresh finding isn't just sitting in an index nobody checks. | **on** |
+| **The narrator voice** | The outer voice, the opposite number of the inner voice: the agent may, sparingly and at its own discretion, wrap a `<narrate>...</narrate>` aside in story prose — what a citizen is doing on the dome, or its own work when there's no village — shown to you distinctly and never fed back into context. The harness also narrates a citizen's birth and harvest itself, unconditionally, the moment either happens — so village life shows up on screen even on a run where the model never says a word about it. | **on** |
 
 Every toggle is reversible and ships with silent migration — flipping one back
 gives you exactly the prior behaviour.
@@ -208,6 +216,7 @@ tiers.
 | `host_shell`, `host_read/write` | **your servers** | reads free; anything mutating asks y/n |
 | `http_request`, `web_search` | VPS | GET free; POST etc. ask you |
 | `write_note`, `finish_run` | VPS | free |
+| `ask_operator` | VPS | free; only offered during a live `go` session — pauses the run to ask you a question and waits for your reply |
 | `list_toolbox` / `equip_tool` | — | library tools load on demand |
 | `forge_tool` | VPS | you review the source before it loads |
 | `load_skill` / `write_skill` | VPS | free (skills on); scoped to the skills dirs |

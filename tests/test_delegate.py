@@ -195,6 +195,54 @@ def test_embodied_child_is_harvested_even_on_cap(project, cfg):
     assert any(" rm -f " in c for c in sandbox.calls)
 
 
+def test_village_narrates_birth_and_harvest(project, cfg, capsys):
+    # Even if the model never says a word, the harness itself narrates the
+    # lifecycle events it already knows happened — birth and harvest.
+    sandbox = SandboxFakeEp()
+    backend = ScriptBackend([
+        _call("sandbox_shell", {"command": "echo hi"}),
+        _call("finish_run", {"summary": "did it in my body"}),
+    ])
+    ctx = _village_ctx(project, cfg, backend, sandbox)
+    subagent.run_child(ctx, "run echo", ["sandbox_shell"], cfg, role="scraper")
+    out = capsys.readouterr().out
+    assert "draws its first breath" in out
+    assert "watch ends" in out
+
+
+def test_village_narration_can_be_disabled(project, cfg, capsys):
+    cfg.set("narrator_enabled", False)
+    sandbox = SandboxFakeEp()
+    backend = ScriptBackend([
+        _call("sandbox_shell", {"command": "echo hi"}),
+        _call("finish_run", {"summary": "did it in my body"}),
+    ])
+    ctx = _village_ctx(project, cfg, backend, sandbox)
+    subagent.run_child(ctx, "run echo", ["sandbox_shell"], cfg, role="scraper")
+    out = capsys.readouterr().out
+    assert "draws its first breath" not in out
+    assert "watch ends" not in out
+
+
+def test_embodied_child_narrate_tag_shown_and_stripped(project, cfg, capsys):
+    # A narrate aside plus plain prose, no tool call: the child returns its
+    # last spoken text as the conclusion (the "stops without finishing still
+    # owes a conclusion" path), which must come back with the tag gone.
+    backend = ScriptBackend([
+        lambda: ChatResult(
+            content="<narrate>a citizen leans into its first task</narrate>"
+                    "the shell ran clean",
+        ),
+    ])
+    sandbox = SandboxFakeEp()
+    ctx = _village_ctx(project, cfg, backend, sandbox)
+    conclusion = subagent.run_child(ctx, "run echo", ["sandbox_shell"], cfg, role="scraper")
+    printed = capsys.readouterr().out
+    assert "a citizen leans into its first task" in printed
+    assert "<narrate>" not in conclusion
+    assert conclusion == "the shell ran clean"
+
+
 def test_village_off_delegation_stays_in_process(project, cfg):
     sandbox = SandboxFakeEp()
     backend = ScriptBackend([

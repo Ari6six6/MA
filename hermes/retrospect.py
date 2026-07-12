@@ -34,6 +34,14 @@ def build_registry(cfg):
 
         for t in skills_tools.TOOLS:
             registry.register(t)
+    # The catalog card digest recirculates into every package, so a tool that
+    # curates it belongs in this narrow pass (same bar as notes/skills). Only
+    # when the catalog is on — otherwise its writes would never surface.
+    if cfg.get("catalog_enabled", True):
+        from hermes.tools import catalog_tools
+
+        for t in catalog_tools.TOOLS:
+            registry.register(t)
     return registry
 
 
@@ -54,9 +62,11 @@ def metrics_block(project, window: int) -> str:
     return "\n".join(lines)
 
 
-def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
+def retrospect(project, backend, cfg, think_re=None, log=None, narrate=print) -> bool:
     """One bounded self-review pass over the last `retrospect_window` runs.
-    Returns True when the pass banked something (a note or a skill)."""
+    Returns True when the pass banked something (a note or a skill).
+    `narrate` defaults to print; pass a no-op to silence the progress lines when
+    the pass runs off the main thread (background housekeeping)."""
     from hermes import package
     from hermes import skills as skills_mod
     from hermes.agent import _assistant_msg, strip_think
@@ -70,12 +80,22 @@ def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
         f"## Run {rid:04d}\n{text}"
         for rid, text in project.recent_summaries(window)
     )
+    # The catalog is the artifact-level view: it lets reflection see problems
+    # that live in the files (duplicated/re-derived scripts, purposeless sprawl)
+    # rather than in the run metrics. Empty/off -> a harmless "(none)".
+    catalog_view = ""
+    if cfg.get("catalog_enabled", True):
+        from hermes import catalog as catalog_mod
+        catalog_view = catalog_mod.digest(
+            project, int(cfg.get("catalog_digest_chars", 2000))
+        )
     prompt = package.render(package.retrospect_prompt(), {
         "metrics": metrics_block(project, window),
         "summaries": summaries or "(none)",
         "skills_index": skills_mod.index(project) or "(none)",
         "notes": package.truncate_keep_tail(project.read_notes().strip(), 2000)
         or "(none)",
+        "catalog": catalog_view or "(none)",
     })
     registry = build_registry(cfg)
     # An unattended reflection pass must never approve anything on the
@@ -99,7 +119,7 @@ def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
                  "tool_calls": [{"name": tc.name, "arguments": tc.arguments}
                                 for tc in result.tool_calls]})
         if shown:
-            print(magenta("  [retrospect] ") + dim(shown.splitlines()[0][:120]))
+            narrate(magenta("  [retrospect] ") + dim(shown.splitlines()[0][:120]))
         if not result.tool_calls:
             return banked
         msgs.append(_assistant_msg(result))
@@ -109,11 +129,12 @@ def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
                        "calling tools when you're done.")
             else:
                 out = registry.dispatch(tc.name, tc.arguments, ctx)
-                if tc.name in ("write_note", "write_skill") and \
+                if tc.name in ("write_note", "write_skill", "catalog_note") and \
                         not out.startswith(("ERROR", "DENIED")):
                     banked = True
-                    print(magenta("  (retrospect banked a "
-                                  f"{'note' if tc.name == 'write_note' else 'skill'})"))
+                    kind = {"write_note": "note", "write_skill": "skill",
+                            "catalog_note": "catalog annotation"}[tc.name]
+                    narrate(magenta(f"  (retrospect banked a {kind})"))
             if log:
                 log({"role": "retrospect-tool", "name": tc.name, "content": out})
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": out})
@@ -121,7 +142,7 @@ def retrospect(project, backend, cfg, think_re=None, log=None) -> bool:
 
 
 def maybe_retrospect(project, backend, cfg, run_id: int, think_re=None,
-                     log=None) -> bool:
+                     log=None, narrate=print) -> bool:
     """Trigger a pass at the end of a run when it's due — every
     `retrospect_every_runs` runs, stateless like directive reconciliation.
     Gated by the caller on `retrospect_enabled`. Returns True if the pass
@@ -129,4 +150,4 @@ def maybe_retrospect(project, backend, cfg, run_id: int, think_re=None,
     every = max(1, int(cfg.get("retrospect_every_runs", 5)))
     if run_id % every != 0:
         return False
-    return retrospect(project, backend, cfg, think_re=think_re, log=log)
+    return retrospect(project, backend, cfg, think_re=think_re, log=log, narrate=narrate)

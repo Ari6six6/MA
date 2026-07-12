@@ -276,12 +276,95 @@ QWEN_40B = ModelSpec(
     ],
 )
 
+# GLM-4.7-Flash (Zhipu's 30B-A3B MoE reasoner) as HauhauCS's Balanced uncensored
+# finetune, served from the *full-precision* FP16 GGUF on llama.cpp. It's a
+# Mixture-of-Experts model — 31B total, ~3B active per token routed through 64
+# experts + 1 shared — so it carries a big model's breadth of knowledge at a
+# small model's per-token cost: exactly the "wider domain knowledge without a
+# proportional slowdown" an MoE buys. FP16 is the beast build — no quantization
+# at all, ~62GB of weights — so it wants an 80GB card (tight context) or two
+# GPUs. llama.cpp serves GLM's own chat template (`--jinja`), which emits OpenAI
+# tool calls; a from-source build is recent enough to carry GLM-4.7 tool support.
+GLM = ModelSpec(
+    key="glm",
+    label="GLM-4.7-Flash (HauhauCS Balanced, uncensored) · FP16 GGUF",
+    repo="HauhauCS/GLM-4.7-Flash-Uncensored-HauhauCS-Balanced",
+    identity=(
+        "GLM-4.7-Flash (the HauhauCS Balanced uncensored finetune of Zhipu's "
+        "30B-A3B MoE reasoner), running as the mind of the Hermes agent system"
+    ),
+    min_total_gb=66,  # ~62GB of FP16 weights + KV/overhead; an 80GB card just fits
+    max_model_len=131072,  # GLM-4.7-Flash's native 128K context
+    # Tiers are total-VRAM brackets, not a live free-VRAM calc, so they carry a
+    # safety margin: after ~62GB of FP16 weights, KV runs ~190KB/token (plus a
+    # few GB of llama.cpp compute buffers). The brackets stay a notch below what
+    # the arithmetic allows, both for that buffer and because GLM's exact KV-head
+    # count is estimated — an under-estimate must not OOM the box.
+    context_tiers=[
+        (80, 16384),   # ~70-79GB: only just clears the ~62GB weights — keep tight
+        (88, 32768),   # single 80GB card (~80): ~18GB free after weights
+        (100, 65536),  # ~88-99GB (H100 NVL 93, 96GB cards): comfortable KV headroom
+        (120, 98304),  # ~100-119GB: lots of room
+    ],
+    context_beyond=131072,  # ~120GB+ (H200 and up): the full native 128K
+    weights_note="first run downloads the ~62GB FP16 GGUF",
+    served_name="glm-4.7-flash",
+    server="llama_cpp",
+    quantization="gguf",
+    gguf_file="GLM-4.7-Flash-Uncensored-HauhauCS-Balanced-FP16.gguf",
+    ready=False,
+    # Build profile: GLM-4.7-Flash is a reasoning + agentic-coding MoE, and this
+    # is the FP16 (lossless) GGUF — so, unlike the Q5 Qwen, there's no
+    # quantization tail to trim and min_p stays at 0. Zhipu's recommended
+    # reasoning sampling is temp 0.6 / top_p 0.95; top_k 20 and a little
+    # presence_penalty keep an uncensored finetune's long tool chains from
+    # looping. It thinks before answering, so give the completion budget real
+    # headroom or it spends the turn reasoning and never emits the call. GGUF on
+    # llama.cpp → no forced tool_choice.
+    sampling={
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 0.4,
+    },
+    max_completion_tokens=12288,
+    stall_nudges=3,
+    think_tags=("think",),
+    supports_forced_tool_choice=False,
+    tool_guidance=(
+        "You are GLM-4.7-Flash, a reasoning MoE built for agentic work, driving "
+        "this agent. Play to that strength and keep your tool-calling tight:\n"
+        "- Think briefly, then act. Your reasoning is genuinely useful, but keep "
+        "it short and decisive — settle the next concrete step and emit the tool "
+        "call in the same turn. Don't deliberate across turns without acting.\n"
+        "- One tool per step; read its result before the next call. Never paste "
+        "shell commands or code as a message for someone to run — run them "
+        "yourself with a tool.\n"
+        "- Every turn either makes a tool call or, if the task is truly finished, "
+        "calls `finish_run` — never end a turn with a plan and no call.\n"
+        "- The operator y/n gates and the keep-internet-on-the-VPS rule are real, "
+        "enforced by trust rather than a cage. Honour them; a DENIED result means "
+        "adapt your approach, not retry the same call."
+    ),
+    notes_extra=[
+        "First serve builds llama.cpp with CUDA on the box (needs the CUDA "
+        "toolkit / nvcc — use a CUDA-devel image, not runtime-only). The "
+        "from-source build is recent enough for GLM-4.7 tool calls under --jinja.",
+        "FP16 is the full-precision build (~62GB) — it wants an 80GB card (tight "
+        "context) or two GPUs, not a single 24/48GB card.",
+        "Community uncensored finetune — sanity-check its tool-calling discipline "
+        "before trusting it with host writes.",
+    ],
+)
+
 # Order is the picker order; HERMES first as the ready default.
 CATALOG: dict[str, ModelSpec] = {
     HERMES.key: HERMES,
     QWEN_OFFICIAL.key: QWEN_OFFICIAL,
     QWEN.key: QWEN,
     QWEN_40B.key: QWEN_40B,
+    GLM.key: GLM,
 }
 DEFAULT_KEY = HERMES.key
 

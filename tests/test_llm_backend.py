@@ -7,7 +7,7 @@ httpx's MockTransport, so no network or GPU is involved.
 import httpx
 import pytest
 
-from hermes.llm import LLMTransportError, OpenAIBackend
+from hermes.llm import LLMTransportError, MockBackend, OpenAIBackend
 
 
 def make_backend(handler, cfg=None, monkeypatch=None):
@@ -36,6 +36,121 @@ def _message(content=None, tool_calls=None):
     return {
         "choices": [{"message": {"content": content, "tool_calls": tool_calls}}]
     }
+
+
+def test_default_timeout_is_300():
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1"}.get(key, default)
+
+    backend = OpenAIBackend(DictCfg())
+    assert backend.client.timeout.read == 300.0
+
+
+def test_llm_timeout_is_configurable():
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1",
+                    "llm_timeout": 900}.get(key, default)
+
+    backend = OpenAIBackend(DictCfg())
+    assert backend.client.timeout.read == 900.0
+
+
+def test_housekeeping_backend_has_short_timeout_and_no_retries():
+    # The librarian's side-passes must not inherit a real turn's long timeout
+    # or its retry ladder — a slow box should make them skip, not block the REPL
+    # for llm_timeout × 4 attempts (~an hour at llm_timeout=900).
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1",
+                    "llm_timeout": 900,
+                    "housekeeping_timeout": 90}.get(key, default)
+
+    hk = OpenAIBackend(DictCfg()).housekeeping()
+    assert hk.client.timeout.read == 90.0   # the tight cousin, not 900s
+    assert hk.RETRY_DELAYS == ()             # single attempt, no ladder
+
+
+def test_housekeeping_timeout_defaults_to_120():
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1"}.get(key, default)
+
+    hk = OpenAIBackend(DictCfg()).housekeeping()
+    assert hk.client.timeout.read == 120.0
+
+
+def test_housekeeping_backend_fails_fast_without_retry(monkeypatch):
+    slept = []
+    monkeypatch.setattr("hermes.llm.time.sleep", lambda s: slept.append(s))
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectError("box is slow")
+
+    hk = OpenAIBackend.__new__(OpenAIBackend)  # bypass real client for the mock
+    hk._httpx = httpx
+    hk._quiet = False
+    hk.RETRY_DELAYS = ()
+    hk.url = "http://127.0.0.1:8000/v1/chat/completions"
+
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"model": "test-model", "sampling": {}}.get(key, default)
+
+    hk.cfg = DictCfg()
+    hk.client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(LLMTransportError):
+        hk.chat([{"role": "user", "content": "go"}])
+    assert calls["n"] == 1   # exactly one attempt — no retry storm
+    assert slept == []       # and no retry sleeps
+
+
+def test_mock_backend_housekeeping_returns_self():
+    b = MockBackend()
+    assert b.housekeeping() is b
+
+
+def test_housekeeping_quiet_flag_propagates():
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1"}.get(key, default)
+
+    base = OpenAIBackend(DictCfg())
+    assert base.housekeeping()._quiet is False           # foreground: proof-of-life stays
+    assert base.housekeeping(quiet=True)._quiet is True   # background: silent
+
+
+def test_quiet_backend_silences_the_heartbeat(monkeypatch):
+    # The background housekeeping thread blocks no one, so its "waiting on the
+    # model" heartbeat must not print into the operator's live prompt.
+    import hermes.llm as llm
+    from contextlib import contextmanager
+
+    seen = {}
+
+    @contextmanager
+    def fake_heartbeat(label, interval=15.0, printer=print):
+        seen["printer"] = printer
+        yield
+
+    monkeypatch.setattr(llm, "heartbeat", fake_heartbeat)
+
+    def handler(request):
+        return httpx.Response(200, json=_message(content="ok"))
+
+    class DictCfg:
+        def get(self, key, default=None):
+            return {"base_url": "http://127.0.0.1:8000/v1"}.get(key, default)
+
+    for quiet, heartbeat_is_real_print in [(False, True), (True, False)]:
+        backend = OpenAIBackend(DictCfg(), quiet=quiet)
+        backend.client = httpx.Client(transport=httpx.MockTransport(handler))
+        backend.chat([{"role": "user", "content": "hi"}])
+        assert (seen["printer"] is print) is heartbeat_is_real_print
 
 
 def test_plain_text_response():
@@ -134,6 +249,25 @@ def test_retries_on_5xx_then_succeeds(monkeypatch):
     result = backend.chat([{"role": "user", "content": "go"}])
     assert result.content == "recovered"
     assert calls["n"] == 2
+
+
+def test_retry_prints_a_visible_reason(monkeypatch, capsys):
+    # A retry used to loop silently — the operator saw zero output whether the
+    # model was thinking or the tunnel was down. It must say something.
+    monkeypatch.setattr("hermes.llm.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, text="overloaded")
+        return httpx.Response(200, json=_message(content="recovered"))
+
+    backend = make_backend(handler)
+    backend.chat([{"role": "user", "content": "go"}])
+    captured = capsys.readouterr()
+    assert "retrying" in captured.out
+    assert "HTTP 503" in captured.out
 
 
 def test_transport_error_raises_after_retries(monkeypatch):

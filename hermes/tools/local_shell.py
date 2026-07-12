@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 
 from hermes.tools.base import obj_schema, tool
+from hermes.ui import heartbeat
 
 
 @tool(
@@ -39,14 +40,15 @@ def local_shell(args, ctx):
                        detail=f"  $ {command}\n  (cwd: {cwd}, timeout: {timeout}s)"):
         return "DENIED by operator."
     try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        with heartbeat(f"running `{command[:60]}`"):
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
     except subprocess.TimeoutExpired:
         return f"ERROR: command timed out after {timeout}s"
     out = (proc.stdout or "") + (("\n[stderr]\n" + proc.stderr) if proc.stderr else "")

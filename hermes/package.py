@@ -114,6 +114,15 @@ def build_system_prompt(project: Project, env: dict, cfg: Config | None = None) 
             "tests, or hit the endpoint — and seen the real output. Written but "
             "not run is not done; say \"written, not yet run\" and then run it."
         )
+    if cfg is not None and cfg.get("stuck_guard_enabled", False):
+        system += (
+            "\n\nStuck-loop rule: if an execution attempt fails, repeating that "
+            "exact approach — even reworded — is mechanically DENIED, not just "
+            "discouraged. The same is true the instant your operator vetoes an "
+            "approach live. A DENIED (stuck guard) or an operator VETO means "
+            "that path is closed for the rest of this run: name a genuinely "
+            "different approach instead of retrying it with small variations."
+        )
     if cfg is not None and cfg.get("skills_enabled", False):
         from hermes import skills as skills_mod
         idx = skills_mod.index(project)
@@ -124,6 +133,18 @@ def build_system_prompt(project: Project, env: dict, cfg: Config | None = None) 
                 "When one covers the task at hand, load it first — it holds the "
                 "gotchas. After a task that took real figuring-out, capture what you "
                 "learned with `write_skill` (or update an existing skill).\n\n" + idx
+            )
+    if cfg is not None and cfg.get("almanac_enabled", False):
+        from hermes import almanac as almanac_mod
+        idx = almanac_mod.index(int(cfg.get("almanac_index_chars", 1200)))
+        if idx:
+            system += (
+                "\n\n## Almanac — hypotheses from every project, not just this one\n\n"
+                "Each line is a theory of WHY something failed or succeeded, banked "
+                "by the librarian after a run where expected and actual didn't match. "
+                "`load_almanac(topic)` for the full writeup and evidence. Check it "
+                "before an approach that smells like one that's already gone wrong "
+                "somewhere else.\n\n" + idx
             )
     guidance = (env.get("model_tool_guidance") or "").strip()
     if guidance:
@@ -136,13 +157,17 @@ def build_system_prompt(project: Project, env: dict, cfg: Config | None = None) 
     return system
 
 
-def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict]:
+def assemble(project: Project, prompt: str, env: dict, cfg: Config,
+             magazine_text: str | None = None) -> list[dict]:
     """Build the two-message package. `env` carries gpu_status,
-    remote_workspace and context_window (0 if unknown)."""
+    remote_workspace and context_window (0 if unknown). `magazine_text`, when
+    given, is the librarian's morning brief (composed by the caller in debate
+    mode) — it rides in the pre-request slot in place of the new-since memo."""
     total_chars = package_budget_chars(cfg, env.get("context_window") or 0)
     budget = {k: int(total_chars * share) for k, share in SECTION_SHARES.items()}
 
     mission = truncate_keep_head(project.read_mission().strip(), budget["mission"])
+    strategy = truncate_keep_head(project.read_strategy().strip(), budget["mission"])
 
     # Directive reconciliation (feature 1): when on, the distilled directives.md
     # is the authoritative standing-instruction channel and only the last K raw
@@ -178,7 +203,20 @@ def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict
         last_reply_block = "# YOUR LAST REPLY\n(none yet)"
 
     notes = truncate_keep_tail(project.read_notes().strip(), budget["notes"])
-    workspace = truncate_keep_head(project.workspace_listing(), budget["workspace"])
+    # The librarian's cards (kind + purpose + supersedes/duplicate links) replace
+    # the bare name+size listing when a catalog exists, so the model sees what its
+    # files are FOR. Falls back to the plain listing before the first catalog pass.
+    catalog_view = ""
+    if cfg.get("catalog_enabled", True):
+        from hermes import catalog as catalog_mod
+        catalog_view = catalog_mod.digest(
+            project, min(cfg.get("catalog_digest_chars", 2000), budget["workspace"])
+        )
+    workspace = catalog_view or truncate_keep_head(
+        project.workspace_listing(), budget["workspace"]
+    )
+    workspace_header = "# WORKSPACE (your files — what each is for)" if catalog_view \
+        else "# WORKSPACE"
 
     if directives_on:
         history_header = (
@@ -189,6 +227,15 @@ def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict
         history_header = "# PROMPT HISTORY (operator, oldest first)"
 
     sections = ["# MISSION\n" + (mission or "(empty)")]
+    # The campaign plan, when the operator has set one. Placed right after the
+    # mission (the standing purpose) and before directives: the strategy is the
+    # current line the day-to-day moves should serve. Absent by default, so a
+    # project with no strategy.md adds no section at all.
+    if strategy:
+        sections.append(
+            "# STRATEGY (the general line this project is pursuing — your "
+            "day-to-day moves should serve this)\n" + strategy
+        )
     if directives_on:
         sections.append(
             "# DIRECTIVES (authoritative standing instructions — obey these; "
@@ -205,9 +252,45 @@ def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict
         "# RUN SUMMARIES (your own past runs)\n" + (summaries or "(none yet)"),
         last_reply_block,
         "# NOTES (your own)\n" + (notes or "(none)"),
-        "# WORKSPACE\n" + workspace,
-        "# CURRENT REQUEST\n" + prompt.strip(),
+        workspace_header + "\n" + workspace,
     ]
+    # The librarian's memo (feature 14 follow-up): cards banked or refined
+    # since this project's own last run, placed last — right next to the
+    # request itself — on purpose. RUN SUMMARIES/NOTES/LAST REPLY above are
+    # the agent's own past output and self-reinforce; a passive index buried
+    # in the system prompt is easy to never check. This is neither: it's new,
+    # it's unmissable, and it's gone once read (the cursor advances the
+    # moment this package is built for a real run — see agent.run).
+    if magazine_text:
+        # The librarian's morning brief (debate): it already reasoned over the
+        # almanac, the strategy, and the agent's own recent runs, so it stands
+        # in place of the raw new-since memo below — one considered page, not
+        # two. Same slot, same "colleague not commander" posture.
+        brief = truncate_keep_head(magazine_text.strip(),
+                                   int(cfg.get("magazine_chars", 2500)))
+        sections.append(
+            "# LIBRARIAN'S MAGAZINE (your morning brief — read this first)\n"
+            "Your librarian worked ahead of you this morning: read the "
+            "strategy, your own recent runs, and the almanac, and left you "
+            "this. A colleague's brief, not an order — but if it says you "
+            "already tried something and why it failed, don't spend the turn "
+            "re-trying it.\n\n" + brief
+        )
+    elif cfg.get("almanac_enabled", False):
+        from hermes import almanac as almanac_mod
+        memo = almanac_mod.new_since(
+            project.almanac_cursor(), int(cfg.get("almanac_memo_chars", 1500))
+        )
+        if memo:
+            sections.append(
+                "# LIBRARIAN MEMO (since your last run here)\n"
+                "A colleague's notes, not an order — the librarian reviewed "
+                "outcomes across projects and flagged what's below as "
+                "possibly relevant to what you're about to do. Worth a look "
+                "if any of it overlaps with your plan; use your own judgment "
+                "on whether it applies.\n\n" + memo
+            )
+    sections.append("# CURRENT REQUEST\n" + prompt.strip())
     user = "\n\n".join(sections)
 
     return [
@@ -226,6 +309,18 @@ def compact_prompt() -> str:
 
 def retrospect_prompt() -> str:
     return _template("retrospect.md")
+
+
+def almanac_prompt() -> str:
+    return _template("almanac.md")
+
+
+def magazine_prompt() -> str:
+    return _template("magazine.md")
+
+
+def attempt_prompt() -> str:
+    return _template("attempt.md")
 
 
 def skills_nudge() -> str:
@@ -284,6 +379,33 @@ def verify_failed(report: str) -> str:
     )
 
 
+def stuck_blocked(name: str, brief: str, vetoed: bool, fails: int) -> str:
+    if vetoed:
+        reason = "your operator explicitly vetoed this exact approach, live"
+    else:
+        reason = f"this exact approach already failed {fails} time(s) this run"
+    return (
+        f"DENIED (stuck guard): {reason} — {name}({brief}) will not run again "
+        "this run, not even reworded. Stop and reconsider: name the OTHER "
+        "approaches you had in mind for this task and pick a genuinely "
+        "different one, or use ask_operator if you're out of ideas."
+    )
+
+
+def veto_ack(brief: str) -> str:
+    return (
+        f"[operator VETO — sent live: they are explicitly telling you to stop "
+        f"the approach you just tried ({brief}) and not repeat it. This is now "
+        "hard-blocked for the rest of this run — do not retry it, even "
+        "reworded. Acknowledge briefly, then pick a genuinely different "
+        "approach.]"
+    )
+
+
+def stuck_escalation_nudge() -> str:
+    return _template("stuck_guard.md").strip()
+
+
 def stall_nudge(repeated: bool = False) -> str:
     text = _template("stall.md").strip()
     if repeated:
@@ -292,6 +414,10 @@ def stall_nudge(repeated: bool = False) -> str:
             "acting. Stop announcing and make the tool call NOW."
         )
     return text
+
+
+def reflect_nudge() -> str:
+    return _template("reflect.md").strip()
 
 
 def operator_message(text: str) -> str:

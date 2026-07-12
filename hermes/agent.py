@@ -3,29 +3,41 @@ loop -> a final answer + a summary the next run will inherit."""
 
 from __future__ import annotations
 
+import atexit
 import json
-import os
 import re
+import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import urlparse
 
 from hermes import checkpoint
 from hermes import compaction
+from hermes import go_state
 from hermes import hosts as hosts_mod
 from hermes import http_policy
 from hermes import package
 from hermes.llm import ChatResult, LLMTransportError
 from hermes.tools import build_registry
 from hermes.tools.base import ToolContext
-from hermes.ui import cyan, dim, green, magenta, red, yellow
+from hermes.ui import bold, cyan, dim, green, magenta, red, yellow
 
 THINK_RE = re.compile(r"<(?:seed:)?think>.*?</(?:seed:)?think>\s*", re.S)
 # Just the reasoning tags, for recovering the inner text (inner-voice log).
 _THINK_TAG_RE = re.compile(r"</?(?:seed:)?think(?:ing)?>\s*", re.S)
+# The narrator voice (feature 15): a Hermes-defined tag, not a model-native one
+# like <think>, so it needs no per-model variants — the system prompt teaches
+# the model to use it verbatim.
+NARRATE_RE = re.compile(r"<narrate>.*?</narrate>\s*", re.S)
+_NARRATE_TAG_RE = re.compile(r"</?narrate>\s*", re.S)
 VERDICT_RE = re.compile(r"VERDICT:\s*(PASS|FAIL)", re.I)
 MAX_CONSECUTIVE_ERRORS = 3
+
+# Reflection nudge (feature 13): a turn counts as "reflective" once its visible
+# prose reaches this length — long enough to actually state an expectation or
+# assessment, short enough that an honest one-liner still counts. A turn under
+# this, even with tool calls attached, is treated as silent action.
+REFLECT_MIN_PROSE_CHARS = 40
 
 # Tools that put code on disk — the trigger for an independent verification
 # pass. (Running-only tasks like "check the logs" don't need code-verifying.)
@@ -49,6 +61,11 @@ VERIFY_EVIDENCE_TOOLS = frozenset({
 EXECUTION_TOOLS = frozenset({
     "local_shell", "sandbox_shell", "remote_shell", "host_shell", "http_request",
 })
+
+# Tools tracked in the almanac's outcomes ledger (feature 14) — writing code
+# and running something are both "an attempt with a real result," the shape
+# the librarian's end-of-run pass reasons over.
+OUTCOME_TRACKED_TOOLS = CODE_WRITE_TOOLS | EXECUTION_TOOLS
 
 # Tools whose output enters context FROM THE NETWORK — i.e. untrusted data
 # (feature 8). When the Docker/browser sandbox lands, its runtime-output tools
@@ -141,6 +158,28 @@ def extract_think(text: str | None, pattern: "re.Pattern" = THINK_RE) -> list[st
     return out
 
 
+def strip_narrate(text: str | None) -> str:
+    if not text:
+        return ""
+    return NARRATE_RE.sub("", text).strip()
+
+
+def extract_narrate(text: str | None) -> list[str]:
+    """Return the narrator-voice segments inside <narrate>…</narrate> blocks, in
+    order — the outer voice, the opposite number of extract_think's inner one.
+    Unlike <think>, this text IS meant for the operator's screen: it is pulled
+    out of the visible reply so it can be printed in its own distinct style
+    instead of blending into the dense, technical reply text."""
+    if not text:
+        return []
+    out: list[str] = []
+    for m in NARRATE_RE.finditer(text):
+        inner = _NARRATE_TAG_RE.sub("", m.group(0)).strip()
+        if inner:
+            out.append(inner)
+    return out
+
+
 def _think_re(tags) -> "re.Pattern":
     """Build the reasoning-stripper for a model's own tags. Hermes emits
     <think>/<seed:think>; Qwen uses <think>; some finetunes add <thinking>."""
@@ -152,39 +191,154 @@ def _normalize(text: str) -> str:
     return " ".join(text.split()).lower()
 
 
-def _drain_inbox(inbox_path) -> list[str]:
-    """Pop every pending message a separate `hermes go say` process wrote,
-    atomically. Renaming the file aside before reading (instead of
-    read-then-truncate) means a `go say` racing this drain either lands in the
-    detached old file — read right here — or recreates the path fresh, picked
-    up next turn boundary: never silently lost, only possibly delayed a turn."""
-    inbox_path = Path(inbox_path)
-    if not inbox_path.exists():
-        return []
-    tmp = inbox_path.with_name(inbox_path.name + f".draining.{os.getpid()}")
+_DIGITS_RE = re.compile(r"\d+")
+_EXIT_CODE_RE = re.compile(r"^exit code (\d+)")
+
+
+def _execution_failed(output: str) -> bool:
+    """True if an EXECUTION_TOOLS result counts as a failed attempt for the
+    stuck guard. Most of these tools don't raise a tool ERROR/DENIED when the
+    *command itself* fails — local_shell/sandbox_shell/remote_shell/host_shell
+    all happily return "exit code 1\\n..." for a command that ran fine but did
+    the wrong thing, which is exactly the case that matters here."""
+    if output.startswith(("ERROR", "DENIED")):
+        return True
+    m = _EXIT_CODE_RE.match(output)
+    return bool(m) and m.group(1) != "0"
+
+
+def _attempt_fingerprint(name: str, arguments: str) -> str:
+    """A stable signature for 'the same approach', used by the stuck guard.
+    Same tool + the same normalized command/content — whitespace collapsed,
+    digits blurred so a retry that only tweaked a number still matches — is
+    deliberately coarse: a near-miss on the SAME broken idea should still be
+    caught, not slip through on a technicality."""
     try:
-        inbox_path.rename(tmp)
-    except OSError:
-        return []
+        args = json.loads(arguments or "{}")
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    payload = args.get("command") or args.get("content") or json.dumps(args, sort_keys=True)
+    normalized = _DIGITS_RE.sub("#", " ".join(str(payload).split()).lower())
+    return f"{name}:{normalized[:300]}"
+
+
+_SILENT = lambda *a, **k: None  # noqa: E731 — a no-op narrator for the background
+
+
+# Phase 2: the librarian's three heavy end-of-run passes — retrospection, the
+# catalog, the almanac — run in a daemon thread so the operator gets the prompt
+# back the instant a run finishes, instead of waiting out three model passes on
+# a slow box between every turn. The passes write only their own asset files
+# (notes/skills/cards, and the append-only almanac); the NEXT run's
+# package.assemble reads those files, so the one hard invariant is: join the
+# previous run's housekeeping before this run assembles. We also join at process
+# exit, so a one-shot `run` (or the last turn of a sitting) never loses the work
+# to interpreter shutdown. Only these three qualify — each uses a fail-closed,
+# read-only registry (no stdin, no state-changing side effects), so running them
+# off the main thread is safe. The skills nudge (full registry + the run's real
+# confirm, which can touch stdin) and directive reconciliation (needed before
+# THIS run assembles) stay synchronous.
+#
+# One in flight at a time: a REPL is sequential, and `go` is a separate process,
+# so a single module-level handle is enough. Announcements are collected by the
+# worker and printed by whoever joins — always the main thread, never the worker
+# (this app deliberately keeps background threads off the REPL's stdout; see
+# cli.main's note on patch_stdout).
+class _Housekeeping:
+    def __init__(self):
+        self.thread: threading.Thread | None = None
+        self.announcements: list[str] = []
+
+
+_PENDING = _Housekeeping()
+
+
+def flush_housekeeping(out=print) -> None:
+    """Join any in-flight background housekeeping and print what it did. Called
+    at the start of every run (before assemble — the correctness barrier), when
+    an interactive sitting ends, and at process exit. A no-op when nothing is
+    pending, so synchronous callers (and every test) pay nothing."""
+    t = _PENDING.thread
+    if t is None:
+        return
     try:
-        text = tmp.read_text()
-    finally:
-        tmp.unlink(missing_ok=True)
-    out: list[str] = []
-    for line in text.splitlines():
+        t.join()
+    except KeyboardInterrupt:
+        # The operator Ctrl-C'd the wait. The daemon keeps going; the next
+        # flush (or atexit) will join it. Never crash the REPL over this.
+        return
+    _PENDING.thread = None
+    anns, _PENDING.announcements = _PENDING.announcements, []
+    for line in anns:
+        out(line)
+
+
+atexit.register(flush_housekeeping)
+
+
+def _librarian_passes(project, hk_backend, cfg, run_id, code_outcomes,
+                      think_re, log, backend_dead, mode=None, prompt="",
+                      final_text="") -> list[str]:
+    """Run the heavy end-of-run passes and return announcement lines for the
+    caller to print (from the main thread). Prints nothing itself and never
+    raises — safe to run in a background thread. Mirrors the synchronous order
+    the passes used to run in. In debate mode (and only when magazine_enabled),
+    a final pass logs the line the agent argued this turn to the almanac — the
+    night half of the magazine, since a prose debate turn never trips the
+    outcome-failure gate the almanac's own pass keys off."""
+    anns: list[str] = []
+    if cfg.get("retrospect_enabled", False) and not backend_dead:
+        from hermes import retrospect as retrospect_mod
         try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        msg = entry.get("text")
-        if isinstance(msg, str) and msg.strip():
-            out.append(msg.strip())
-    return out
+            if retrospect_mod.maybe_retrospect(
+                project, hk_backend, cfg, run_id,
+                think_re=think_re, log=log, narrate=_SILENT,
+            ):
+                anns.append(magenta("  (retrospection — banked lessons from recent runs)"))
+        except Exception:
+            pass
+    if cfg.get("catalog_enabled", True):
+        from hermes import catalog as catalog_mod
+        cat_backend = None if backend_dead else hk_backend
+        try:
+            n_cards = catalog_mod.maybe_index(
+                project, cat_backend, cfg, run_id, think_re=think_re, log=None,
+            )
+            if n_cards:
+                anns.append(magenta(f"  (catalog — {n_cards} artifact card(s) updated)"))
+        except Exception:
+            pass
+    if cfg.get("almanac_enabled", False) and not backend_dead:
+        from hermes import catalog as catalog_mod
+        try:
+            if catalog_mod.maybe_reflect_outcomes(
+                project, hk_backend, cfg, code_outcomes,
+                think_re=think_re, log=log, narrate=_SILENT,
+            ):
+                anns.append(magenta("  (librarian — banked a hypothesis to the almanac)"))
+        except Exception:
+            pass
+    if (cfg.get("magazine_enabled", False) and mode == "debate"
+            and not backend_dead and final_text):
+        from hermes import magazine as magazine_mod
+        try:
+            if magazine_mod.register_attempt(
+                project, hk_backend, cfg, prompt, final_text,
+                think_re=think_re, log=log, narrate=_SILENT,
+            ):
+                anns.append(magenta("  (librarian — logged this turn's line to the almanac)"))
+        except Exception:
+            pass
+    return anns
 
 
 def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         sandbox=None, quiet=False, max_run_seconds=None, inbox_path=None,
-        on_run_started=None, show_thinking=False):
+        on_run_started=None, show_thinking=False, ask_operator_fn=None,
+        stall_nudges=None, phantom_nudges=None, extra_system=None,
+        background_housekeeping=False, mode=None):
     """Execute one agent run. `env` carries gpu_status / remote_workspace /
     context_window for the package; `gpu` is an SSHEndpoint or None; `sandbox` is
     the VPS sandbox-host SSHEndpoint (the air-gapped exec container) or None.
@@ -202,7 +356,31 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     before the run finishes; a failing callback never breaks the run.
     `show_thinking` prints the model's extracted <think> reasoning alongside
     the regular narration (purely a display choice — the context sent back to
-    the model is unaffected; reasoning is still never re-injected into it)."""
+    the model is unaffected; reasoning is still never re-injected into it).
+    `ask_operator_fn(question) -> reply`, when given, is the foreground-session
+    channel for the `ask_operator` tool: the operator is at the keyboard, so the
+    tool reads their answer directly instead of polling the inbox. Providing it
+    (or `inbox_path`) is what makes `ask_operator` available at all.
+    `stall_nudges` / `phantom_nudges`, when given, override cfg's nudge counts
+    for this one call. `debate` sets both to 0 so a turn that's pure prose is
+    accepted immediately instead of being bounced with "act or finish_run" —
+    the difference between a work run and sitting at the table talking. The
+    reflection nudge (feature 13, `reflect_nudge_enabled`) is cfg-only, no
+    per-call override: it fires whenever the run strings together too many
+    tool-call turns with no reflective prose, `debate` included — that is
+    exactly the silent-chaining `debate` doesn't otherwise guard against,
+    since its stall/phantom nudges are off.
+    `extra_system`, when given, is appended to this run's system prompt (a
+    per-mode framing, e.g. the debate contract) without touching persona.md.
+    `background_housekeeping` (Phase 2) runs the three heavy end-of-run librarian
+    passes (retrospection, catalog, almanac) in a daemon thread so an interactive
+    caller gets the prompt back immediately; the next run joins them before it
+    assembles, and process exit joins them too. Default False keeps them inline
+    and synchronous — every non-interactive caller and every test is unchanged.
+    `mode`, when "debate", turns on the librarian's magazine: a synchronous
+    morning pass composes the forward brief before this turn assembles, and an
+    end-of-turn pass logs the line the agent argued to the almanac. Both are
+    additionally gated on `magazine_enabled`; None (the default) leaves them off."""
     out = (lambda *a, **k: None) if quiet else print
     if confirm_fn is None:
         from hermes.confirm import confirm as confirm_fn
@@ -247,6 +425,19 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         with thinking.open("a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    # The narrator voice (feature 15): the outer voice, the opposite number of
+    # inner_voice above. <think> is private reasoning, stripped and never shown;
+    # <narrate> is the model choosing, at its own discretion, to describe the
+    # scene in story prose for the operator watching — the village, its
+    # citizens, the work — instead of only the dense technical reply. Filed to
+    # its own page for the same reason thinking.jsonl exists: nothing is lost.
+    narrator_enabled = cfg.get("narrator_enabled", True)
+    narration = run_dir / "narration.jsonl"
+
+    def narrate_log(entry: dict):
+        with narration.open("a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
     # Record EVERY y/n gate decision into the transcript, not just the screen:
     # the action, whether it was approved, and whether auto_confirm made the
     # call. This is the training signal for eventually teaching the model to
@@ -261,21 +452,78 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         log({"role": "gate", "action": action, "approved": approved, "auto": _auto_gate})
         return approved
 
+    # Phase 2 correctness barrier: before we assemble the package (which reads
+    # the catalog cards, the almanac, notes/skills), join any housekeeping the
+    # PREVIOUS run left running in the background and print what it did. A no-op
+    # unless a background run is pending — so synchronous callers pay nothing.
+    flush_housekeeping(out)
+
+    # A bounded backend for the librarian's side-passes (reconcile, retrospect,
+    # catalog, almanac, skills nudge). They run in the operator's foreground and
+    # are conveniences — this caps each at housekeeping_timeout with no retries,
+    # so a slow box makes them skip instead of blocking the prompt for ~an hour.
+    # getattr fallback: a backend without the method (a test double, a future
+    # backend) simply runs the passes on itself, exactly as before.
+    hk_backend = backend.housekeeping() if hasattr(backend, "housekeeping") else backend
+
     # Directive reconciliation (feature 1): before assembling, refresh the
     # distilled directives.md when it's due (migration on an old project's first
     # run, or every N runs). Off by default; a failed pass never blocks the run.
     if cfg.get("directives_enabled", False):
         from hermes import directives as directives_mod
-        if directives_mod.maybe_reconcile(project, backend, cfg, run_id, think_re):
+        if directives_mod.maybe_reconcile(project, hk_backend, cfg, run_id, think_re):
             out(magenta("  (reconciled standing instructions → directives.md)"))
             log({"role": "directives", "content": project.read_directives()})
 
-    messages = package.assemble(project, prompt, env, cfg)
+    # The librarian's magazine (the morning brief): in debate mode, before we
+    # assemble, the librarian works AHEAD of the agent — reads the strategy, the
+    # agent's own recent runs, and the almanac, researches when it matters, and
+    # writes magazine.md. It rides in the package below, ahead of the request,
+    # to catch a line the agent already tried. Synchronous on purpose: the brief
+    # has to exist before the package is built. compose() handles a dead backend
+    # itself (returns None); off unless magazine_enabled and mode == "debate".
+    magazine_text = None
+    if cfg.get("magazine_enabled", False) and mode == "debate":
+        from hermes import magazine as magazine_mod
+        try:
+            magazine_text = magazine_mod.compose(
+                project, hk_backend, cfg, prompt,
+                think_re=think_re, log=log, narrate=_SILENT,
+            )
+            if magazine_text:
+                out(magenta("  (librarian — the morning magazine is on your desk)"))
+        except Exception:
+            magazine_text = None
+
+    messages = package.assemble(project, prompt, env, cfg, magazine_text=magazine_text)
+    # The librarian memo (feature 14 follow-up) is "new since last run" — advance
+    # the bookmark the instant it's handed to a real run, so it isn't repeated
+    # next time. package.assemble stays a pure read; this is the one place that
+    # marks it delivered. A failure here never blocks the run.
+    if cfg.get("almanac_enabled", False):
+        from hermes import almanac as almanac_mod
+        try:
+            latest = almanac_mod.latest_id()
+            if latest:
+                project.set_almanac_cursor(latest)
+        except OSError:
+            pass
+    if extra_system and messages and messages[0].get("role") == "system":
+        messages[0]["content"] += "\n\n" + extra_system.strip()
     project.append_history(run_id, prompt)
     for m in messages:
         log({"role": m["role"], "content": m["content"][:200000]})
 
     registry = build_registry(project, cfg, confirm_fn)
+    # Live two-way dialogue: only when there's a channel to answer through — a
+    # foreground `session` (ask_operator_fn, operator at the keyboard) or a
+    # detached `go` (inbox, operator watching a log). Without either, no one
+    # could reply, so ask_operator isn't offered at all rather than dangling as
+    # a tool that can only ever fall back.
+    if inbox_path is not None or ask_operator_fn is not None:
+        from hermes.tools import dialogue
+        for t in dialogue.TOOLS:
+            registry.register(t)
     ctx = ToolContext(
         project=project,
         cfg=cfg,
@@ -287,6 +535,8 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         backend=backend,  # so the delegate tool can run a child loop
         think_re=think_re,
         depth=0,
+        inbox_path=inbox_path,  # ask_operator blocks on this for the operator's reply
+        ask_operator_fn=ask_operator_fn,  # foreground session: reply from the keyboard
     )
     ctx.registry = registry
     ctx._delegate_log = log  # child steps land in the same transcript
@@ -300,9 +550,22 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         cfg.get("max_run_seconds", 0) if max_run_seconds is None else max_run_seconds
     )
     run_started = time.monotonic()
+    # Hard wall-clock deadline (or None when unbounded), so ask_operator can cap
+    # its blocking wait and never push the run past its budget.
+    ctx.run_deadline = run_started + max_run_seconds if max_run_seconds else None
     time_wrapup_sent = False
-    nudges_left = cfg.get("stall_nudges", 2)
-    phantom_nudges_left = cfg.get("phantom_nudges", 1)
+    nudges_left = cfg.get("stall_nudges", 2) if stall_nudges is None else stall_nudges
+    phantom_nudges_left = (
+        cfg.get("phantom_nudges", 1) if phantom_nudges is None else phantom_nudges
+    )
+    # Reflection nudge (feature 13): a bounded number of forced stop-and-think
+    # pauses when the run chains too many tool-only turns with no reflective
+    # prose in between. Off by default (0 budget) like every opt-in feature.
+    reflect_nudges_left = (
+        cfg.get("reflect_nudges", 3) if cfg.get("reflect_nudge_enabled", False) else 0
+    )
+    reflect_nudge_every = max(1, int(cfg.get("reflect_nudge_every", 4)))
+    reflect_streak = 0
     # Verification enforcement (feature 7): a one-shot nudge when a file-mutating
     # run finishes without having executed anything. Cheap, no sandbox needed.
     verify_before_done_left = 1 if cfg.get("verify_before_done", False) else 0
@@ -314,6 +577,26 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         if cfg.get("verify_code_runs", True) and sandbox is not None
         else 0
     )
+    # Stuck-loop guard (feature 12): mechanical enforcement, not a nudge the
+    # model can agree to and then ignore. `attempt_failures` counts how many
+    # times an exact fingerprint has already failed; `vetoed_attempts` is set
+    # instantly by a live "veto" from the operator (via inbox) regardless of
+    # any failure count. `last_guarded` is what the veto command targets.
+    stuck_guard_on = cfg.get("stuck_guard_enabled", False)
+    stuck_repeat_threshold = cfg.get("stuck_repeat_threshold", 1)
+    stuck_escalate_after = cfg.get("stuck_escalate_blocks", 2)
+    attempt_failures: dict[str, int] = {}
+    vetoed_attempts: set[str] = set()
+    last_guarded: dict | None = None
+    blocked_repeats = 0
+    escalation_sent = False
+    # The almanac (feature 14): the outcomes ledger. Every code-write/execution
+    # call this run, paired with whatever the model said it expected (this
+    # turn's own prose, if any — never fabricated) and what the tool actually
+    # returned. Fed to the librarian's end-of-run pass, not read mid-run —
+    # no double voice, one pass, at the end, like the catalog card pass.
+    almanac_on = cfg.get("almanac_enabled", False)
+    code_outcomes: list[dict] = []
     consecutive_errors = 0
     final_text = ""
     prev_shown = ""
@@ -329,6 +612,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     tool_errors = 0
     stall_nudges_used = 0
     phantom_bounces = 0
+    reflect_nudges_used = 0
     verify_bounces = 0
     verify_failures = 0
     tainted_turns = 0
@@ -354,11 +638,32 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                 log({"role": "user", "content": warn})
                 out(yellow("  (85% of the time budget used — telling the model to wrap up)"))
             if inbox_path is not None:
-                for msg in _drain_inbox(inbox_path):
-                    op_msg = package.operator_message(msg)
+                for msg in go_state.drain_inbox(inbox_path):
+                    stripped = msg.strip()
+                    # A live "veto" instantly hard-blocks whatever guarded call
+                    # was last attempted — no parsing of intent, no waiting on
+                    # a failure count, no relying on the model to honour a
+                    # promise made in prose (which is exactly what doesn't work).
+                    is_veto = (
+                        stuck_guard_on and last_guarded is not None
+                        and re.match(r"(?i)^veto\b", stripped)
+                    )
+                    if is_veto:
+                        vetoed_attempts.add(last_guarded["fp"])
+                        op_msg = package.veto_ack(last_guarded["brief"])
+                        out(yellow(
+                            f"  (vetoed: {last_guarded['name']}"
+                            f"({last_guarded['brief']}) — blocked for the rest of this run)"
+                        ))
+                    else:
+                        op_msg = package.operator_message(msg)
                     messages.append({"role": "user", "content": op_msg})
                     log({"role": "operator", "content": msg})
-                    out(magenta("  (operator) ") + dim(_brief(msg, 200)))
+                    # A clear, separated banner so a steer you sent mid-run is
+                    # unmistakable when it lands — not a dim line lost in the
+                    # narration. The model is prompted to reply, which prints next.
+                    out("")
+                    out(bold(magenta("  >> you: ")) + magenta(_brief(msg, 300)))
             if compaction.maybe_compact(
                 messages, stable_prefix, backend, cfg, context_window,
                 schema_chars, think_re=think_re, log=log,
@@ -371,6 +676,12 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     think_log({"turn": turns, "role": "assistant", "content": seg})
                     if show_thinking:
                         out(dim("  ") + magenta("[inner voice] ") + dim(seg))
+            if narrator_enabled:
+                for seg in extract_narrate(shown):
+                    narrate_log({"turn": turns, "role": "assistant", "content": seg})
+                    out("")
+                    out(red("  ✦ ") + red(seg))
+            shown = strip_narrate(shown)
             log(
                 {
                     "role": "assistant",
@@ -432,9 +743,39 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                     except OSError as e:
                         out(yellow(f"  (checkpoint skipped: {e})"))
                 tool_names_used.append(tc.name)
-                output = _dispatch_maybe_tainted(
-                    registry, tc, ctx, confirm_fn, turn_tainted
-                )
+                fp = None
+                if stuck_guard_on and tc.name in EXECUTION_TOOLS:
+                    fp = _attempt_fingerprint(tc.name, tc.arguments)
+                    last_guarded = {"fp": fp, "name": tc.name, "brief": _brief(tc.arguments)}
+                if fp is not None and (
+                    fp in vetoed_attempts
+                    or attempt_failures.get(fp, 0) >= stuck_repeat_threshold
+                ):
+                    blocked_repeats += 1
+                    output = package.stuck_blocked(
+                        tc.name, last_guarded["brief"],
+                        vetoed=fp in vetoed_attempts,
+                        fails=attempt_failures.get(fp, 0),
+                    )
+                else:
+                    output = _dispatch_maybe_tainted(
+                        registry, tc, ctx, confirm_fn, turn_tainted
+                    )
+                    if fp is not None and _execution_failed(output):
+                        attempt_failures[fp] = attempt_failures.get(fp, 0) + 1
+                if almanac_on and tc.name in OUTCOME_TRACKED_TOOLS:
+                    # "expected" is this turn's own visible prose, if any —
+                    # never invented. A tool call with no accompanying reasoning
+                    # honestly records an empty expectation; that's real signal
+                    # too, not a gap to paper over.
+                    outcome = {
+                        "turn": turns, "tool": tc.name,
+                        "call": _brief(tc.arguments),
+                        "expected": shown[:400] if shown else "",
+                        "actual": _brief(output, 400),
+                    }
+                    code_outcomes.append(outcome)
+                    log({"role": "outcome", **outcome})
                 if _is_tainting(tc.name, cfg) and not output.startswith(("ERROR", "DENIED")):
                     turn_produced_taint = True
                 log({"role": "tool", "name": tc.name, "content": output})
@@ -456,6 +797,14 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
 
             # Carry taint to the next turn: untrusted content just entered context.
             pending_taint = turn_produced_taint
+
+            if (stuck_guard_on and not escalation_sent
+                    and blocked_repeats >= stuck_escalate_after):
+                escalation_sent = True
+                nudge = package.stuck_escalation_nudge()
+                messages.append({"role": "user", "content": nudge})
+                log({"role": "user", "content": nudge})
+                out(yellow("  (stuck guard: repeated blocks — forcing a real pivot)"))
 
             if ctx.finish_summary is not None:
                 if phantom_nudges_left > 0 and _is_phantom_finish(
@@ -516,6 +865,25 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
                         continue
                     out(green("  (verification PASSED — the code actually runs)"))
                 break
+            # Reflection nudge (feature 13): this turn made tool calls but didn't
+            # finish. Did it say anything real about what it expected or found, or
+            # was it just another silent link in a chain of actions? Track the
+            # streak; once it's long enough, spend one forced pause making the
+            # model check its own results before it's allowed to act again.
+            if reflect_nudges_left > 0:
+                if shown and len(shown) >= REFLECT_MIN_PROSE_CHARS:
+                    reflect_streak = 0
+                else:
+                    reflect_streak += 1
+                if reflect_streak >= reflect_nudge_every:
+                    reflect_streak = 0
+                    reflect_nudges_left -= 1
+                    reflect_nudges_used += 1
+                    nudge = package.reflect_nudge()
+                    messages.append({"role": "user", "content": nudge})
+                    log({"role": "user", "content": nudge})
+                    out(yellow(f"  ({reflect_nudge_every} actions in a row with no "
+                               "reflection — pausing to think)"))
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 out(yellow("  (circuit breaker: too many consecutive tool errors)"))
                 aborted = True
@@ -560,7 +928,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         )
         if figured_out:
             _skills_nudge(
-                backend, messages, registry, ctx, log,
+                hk_backend, messages, registry, ctx, log,
                 cfg.get("skills_nudge_max_turns", 3), think_re, narrate=out,
             )
 
@@ -580,25 +948,52 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         "tool_errors": tool_errors,
         "stall_nudges": stall_nudges_used,
         "phantom_bounces": phantom_bounces,
+        "reflect_nudges": reflect_nudges_used,
         "verify_bounces": verify_bounces,
         "verify_failures": verify_failures,
         "tainted_turns": tainted_turns,
+        "blocked_repeats": blocked_repeats,
         "tools": sorted(set(tool_names_used)),
     }
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     status = red("aborted") if aborted else green("complete")
     out(f"\n{dim(f'[run {run_id:04d}')} {status} {dim(f'— {turns} turn(s)]')}")
 
-    # Retrospection (feature 9): every N runs, a fresh-context pass reviews the
-    # recorded metrics + summaries of recent runs (including this one, just
-    # written) and banks recurring lessons as notes/skills. A failed pass is a
-    # no-op — the run's result above already stands.
-    if cfg.get("retrospect_enabled", False) and not backend_dead:
-        from hermes import retrospect as retrospect_mod
-        if retrospect_mod.maybe_retrospect(
-            project, backend, cfg, run_id, think_re=think_re, log=log,
+    # The three heavy librarian passes — retrospection (feature 9), the catalog,
+    # and the almanac (feature 14). Each reviews what this run actually did and
+    # banks lessons/cards/hypotheses to the librarian's own asset files. They run
+    # after the run's result is fixed and never change it — pure end-of-run
+    # housekeeping. See _librarian_passes for the per-pass contract (fail-closed,
+    # read-only, never raises). log semantics are unchanged: catalog enrichment
+    # passes log=None (its file-content samples must not pollute the transcript);
+    # retrospection and the almanac keep log=log.
+    if background_housekeeping:
+        # Hand them to a daemon thread so the operator gets the prompt back now.
+        # The next run (or process exit) joins before anything reads these files;
+        # at most one is ever in flight, and we joined the prior one at run start.
+        # The worker's backend is *quiet* — its "waiting on the model" heartbeat
+        # would otherwise print into the operator's live prompt (they're not
+        # blocked on it). Falls back to hk_backend for a backend without the hook.
+        quiet_backend = (backend.housekeeping(quiet=True)
+                         if hasattr(backend, "housekeeping") else hk_backend)
+
+        def _worker():
+            _PENDING.announcements = _librarian_passes(
+                project, quiet_backend, cfg, run_id, code_outcomes,
+                think_re, log, backend_dead,
+                mode=mode, prompt=prompt, final_text=final_text,
+            )
+        t = threading.Thread(target=_worker, daemon=True,
+                             name=f"hermes-housekeeping-{run_id:04d}")
+        _PENDING.thread = t
+        t.start()
+    else:
+        for line in _librarian_passes(
+            project, hk_backend, cfg, run_id, code_outcomes,
+            think_re, log, backend_dead,
+            mode=mode, prompt=prompt, final_text=final_text,
         ):
-            out(magenta("  (retrospection — banked lessons from recent runs)"))
+            out(line)
     return RunResult(run_id, summary, final_text, turns, aborted)
 
 

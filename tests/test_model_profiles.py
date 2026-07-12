@@ -25,7 +25,7 @@ def test_hermes_profile_equals_app_defaults():
 
 def test_every_added_model_has_a_distinct_tuned_build():
     base = models.HERMES
-    for spec in (models.QWEN, models.QWEN_OFFICIAL, models.QWEN_40B):
+    for spec in (models.QWEN, models.QWEN_OFFICIAL, models.QWEN_40B, models.GLM):
         assert spec.tool_guidance.strip(), f"{spec.key} needs tool guidance"
         # something about its build differs from the Hermes baseline
         assert (
@@ -39,12 +39,14 @@ def test_gguf_models_skip_forced_tool_choice():
     # llama.cpp under --jinja doesn't honour named tool_choice
     assert models.QWEN.supports_forced_tool_choice is False
     assert models.QWEN_40B.supports_forced_tool_choice is False
+    assert models.GLM.supports_forced_tool_choice is False
     assert models.QWEN_OFFICIAL.supports_forced_tool_choice is True  # vLLM
 
 
 def test_thinking_models_get_more_completion_headroom():
     assert models.QWEN_OFFICIAL.max_completion_tokens > models.HERMES.max_completion_tokens
     assert models.QWEN_40B.max_completion_tokens > models.HERMES.max_completion_tokens
+    assert models.GLM.max_completion_tokens > models.HERMES.max_completion_tokens
 
 
 def test_runtime_config_round_trips_into_config(cfg):

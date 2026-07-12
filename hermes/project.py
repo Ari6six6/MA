@@ -48,8 +48,24 @@ class Project:
         return self.root / "directives.md"
 
     @property
+    def strategy_path(self) -> Path:
+        """The campaign plan — the LIBRARIAN's, not the operator's. The operator
+        owns mission.md (the standing purpose); the librarian keeps strategy.md
+        (the current line) and refines it from the almanac and the agent's runs.
+        Read by the agent as authoritative and by the librarian's own passes.
+        Absent until the librarian first writes one; read as empty until then."""
+        return self.root / "strategy.md"
+
+    @property
     def history_path(self) -> Path:
         return self.root / "history.jsonl"
+
+    @property
+    def catalog_path(self) -> Path:
+        """The librarian's append-only card log (hermes.catalog): one JSON card
+        per line describing an artifact in the workspace. Append-only so a
+        rewrite supersedes rather than erases — provenance survives."""
+        return self.root / "catalog.jsonl"
 
     @property
     def tools_dir(self) -> Path:
@@ -73,6 +89,14 @@ class Project:
         the harvested logs / inspect record / report / thinking after the body is
         reaped. 'Where there was data, there will be data.'"""
         return self.root / "population"
+
+    @property
+    def almanac_seen_path(self) -> Path:
+        """This project's bookmark into the global almanac (hermes.almanac):
+        the id of the newest card it's already been handed in a librarian
+        memo. Per-project, not global — a fresh project should see the whole
+        backlog once, not just what's new since some other project last read."""
+        return self.root / ".almanac_seen"
 
     @property
     def equipped_path(self) -> Path:
@@ -233,6 +257,15 @@ class Project:
     def read_directives(self) -> str:
         return self.directives_path.read_text() if self.directives_path.exists() else ""
 
+    def read_strategy(self) -> str:
+        return self.strategy_path.read_text() if self.strategy_path.exists() else ""
+
+    def write_strategy(self, text: str) -> None:
+        """The librarian's write surface for the campaign line (used by the
+        write_strategy tool). Full replace — like directives, the strategy is
+        one living document, not an append log."""
+        self.strategy_path.write_text(text.rstrip() + "\n")
+
     def write_directives(self, text: str) -> None:
         self.directives_path.write_text(text.rstrip() + "\n")
 
@@ -240,6 +273,16 @@ class Project:
         stamp = time.strftime("%Y-%m-%d %H:%M")
         with self.notes_path.open("a") as f:
             f.write(f"- [{stamp}] {text.strip()}\n")
+
+    # -- almanac cursor (the librarian memo's bookmark) -----------------------
+    def almanac_cursor(self) -> str | None:
+        if not self.almanac_seen_path.exists():
+            return None
+        text = self.almanac_seen_path.read_text().strip()
+        return text or None
+
+    def set_almanac_cursor(self, entry_id: str) -> None:
+        self.almanac_seen_path.write_text(entry_id)
 
     # -- workspace ------------------------------------------------------------
     def workspace_listing(self, max_entries: int = 60) -> str:

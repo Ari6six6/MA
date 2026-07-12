@@ -457,6 +457,236 @@ per-body filesystems are deliberately deferred.
   traffic carries no external bytes and shouldn't drown routine runs in y/n prompts.
   The rail is never configurable off.
 
+## Feature 12 — Stuck-loop guard
+
+Origin: an operator session where the model verbally agreed to abandon a
+failing approach ("yeah, you're right, let me do something else"), floated a
+couple of alternatives, then walked straight back to the same dead approach —
+because agreeing was just tokens in context with no enforcement behind them.
+
+- **Mechanical DENIED, not a nudge.** Every other correction in this codebase
+  (stall, phantom, verify-before-done) is a message asking the model to behave
+  differently on the next turn — that's the right shape when the model hasn't
+  already shown it will ignore the ask. Here it has: the whole failure mode is
+  a promise with no teeth. So the fix is enforcement at the same tier as a
+  safety gate — `dispatch` never even runs the tool — not more persuasive
+  prose competing with everything else in the package.
+- **Fingerprint the attempt, don't judge the outcome semantically.** A second
+  LLM call to decide "did this match what you expected" would cost a
+  round-trip per attempt and hand the judgment back to the same weights that
+  are stuck. Instead the harness fingerprints tool name + normalized
+  command/content (digits blurred, whitespace collapsed) and counts real
+  ERROR/DENIED results against it — cheap, deterministic, and it catches a
+  retry that only tweaked a number or reworded a comment, which is exactly the
+  "small variations of the same idea" pattern that was actually observed.
+- **Scoped to `EXECUTION_TOOLS` only.** The observed failure was re-running the
+  same doomed command, not rewriting the same file. Guarding `local_shell` /
+  `sandbox_shell` / `remote_shell` / `host_shell` / `http_request` targets the
+  actual pattern without touching checkpointing or the code-write verifier's
+  separate machinery.
+- **A live `veto` is instant and requires no judgment call.** Parsing operator
+  intent out of free text ("stop doing that", "don't go there again") would be
+  guesswork. A literal `veto` sent through the same inbox channel `go say`
+  already uses hard-blocks whatever guarded call was last attempted, the
+  moment it's drained — no failure count required, no waiting for it to fail
+  again first. This is the direct answer to "I had to stop him and he did it
+  anyway": now stopping him actually stops him.
+- **Escalates once, doesn't nag.** `stuck_escalate_blocks` blocked repeats in
+  one run fire a single forced-pivot nudge (reusing the one-shot pattern from
+  phantom/verify-before-done) that names the situation and asks for the
+  alternatives considered up front — not a bounce loop, since a model that's
+  already stuck doesn't need more friction, it needs one clear instruction to
+  do something else.
+- **Off by default, per the house rule**, even though the failure mode it
+  targets is expensive in operator attention — it changes tool-dispatch
+  behavior, so it gets the same opt-in posture as everything else non-safety
+  in this list.
+
+## Feature 13 — Reflection nudge (the stop-and-think gate)
+
+- **Landed independently of Feature 12, targeting a narrower slice of the same
+  complaint.** Both trace back to the same report — corrected, agrees, repeats
+  the mistake minutes later — but they catch different shapes of it. The
+  stuck-loop guard mechanically DENIES an *exact repeat of a failed attempt*
+  (same tool, same normalized command, already failed). This nudge catches
+  the softer, more common case underneath it: a chain of tool calls — failing
+  or not, repeated or not — with *no reasoning turn* in between, the "no space
+  for a new thought" pattern. A run can string together several different,
+  never-repeated, never-failing actions and still never once check whether any
+  of them matched what it expected. The guard wouldn't fire on that; this does.
+  They compose: the guard is the hard stop on a known-bad exact repeat, this is
+  the soft, general checkpoint that catches drift before it gets that far.
+- **A streak counter over turns, not a second model.** Multi-agent debate (a
+  critic model, a second side-call per action) was the more literal reading of
+  "he needs to argue with himself," and was rejected for cost: this harness
+  runs a dense model on rented GPU-hour, and the operator has said directly
+  that a script that doesn't earn its keep is "a waste of time and money."
+  Counting consecutive silent tool-call turns and injecting one nudge message
+  is free — same mechanism as `stall_nudge`, no extra `backend.chat` round-trip.
+- **"Reflective" is measured, not asked for.** A turn only resets the streak if
+  its visible prose reaches `REFLECT_MIN_PROSE_CHARS` (40) — long enough to
+  actually state something, short enough that an honest one-liner counts. This
+  mirrors the codebase's standing refusal to trust self-report: a model saying
+  "I'll reflect on this" without content wouldn't reset anything.
+- **Fires in `debate` mode on purpose, with no per-call override.** Every other
+  nudge (`stall_nudges`, `phantom_nudges`) is something `debate` explicitly
+  turns off, because a table sitting shouldn't be pressured to act or finish.
+  This one is the opposite: `debate` is the *only* mode the operator now runs,
+  and it's exactly where a long silent tool-call chain would otherwise go
+  unchecked, since the modes that would normally catch a stuck loop (stall,
+  phantom) are off. So this is cfg-only, not threaded through `stall_nudges`/
+  `phantom_nudges` overrides, and left on in `debate` by design.
+- **Bounded per run (`reflect_nudges`, default 3), like every other bounce.**
+  Same shape as `phantom_nudges`/`verify_rounds`: spend the budget, then let
+  the run continue rather than nudging forever — a genuinely long silent
+  streak shouldn't turn into an infinite loop of its own.
+- **On by default (`reflect_nudge_enabled`) — the second exception to the house
+  rule, granted the same way the first one was.** Shipped off by default first,
+  the same posture as every other opt-in feature; the operator then said
+  directly, in the same session, that they need it on now to actually use it —
+  the identical shape as "waking the faculties" (skills/delegate/retrospect
+  flipped on after the operator's explicit real-time call, not left for the
+  next person to discover a silent flag). Individually reversible with
+  `config reflect_nudge_enabled false`.
+
+## Feature 14 — The almanac (the librarian's second job)
+
+Origin: the operator, immediately after Feature 13 shipped, drew a sharp line
+this codebase hadn't drawn yet — no more mid-loop voices ("no double voice in
+there"), but a real, non-negotiable requirement that every write/execution
+carry a stated expectation, and that *something* — the librarian, at the end
+of the loop, alongside the catalog pass — checks that expectation against what
+actually happened, forms a real hypothesis for WHY when they diverge, and
+banks it somewhere durable and shared, "like an almanac." Explicitly asked
+for research capability too: "he can go to the Internet."
+
+- **One pass, at the end, not a voice in the loop.** This is the direct answer
+  to "no discussion there, really." Feature 13 already pauses mid-run;
+  stacking a second, different mid-run mechanism on top would be exactly the
+  "double voice" the operator ruled out. The outcomes ledger is captured
+  during the loop (free — no LLM call, just harness bookkeeping alongside the
+  existing per-tool-call logging) but never READ until the run is over, at the
+  same point the catalog already runs its own end-of-run pass.
+- **Folded into `hermes/catalog.py`, not a new `librarian.py`.** The codebase
+  already calls that module's docstring "The librarian" (the catalog-card
+  pass). The operator described this new work as "the librarian... doing
+  something extra" at the exact same moment the catalog already fires — so
+  extending the module that already owns that name is truer to the ask than
+  inventing a second thing with the same name. `reflect_outcomes` /
+  `maybe_reflect_outcomes` sit beside `index` / `maybe_index` in one file; they
+  share no state, only the name and the moment they run.
+- **A dedicated global store, not a repurposed skill or catalog scope.**
+  Skills are procedures ("how"); the almanac is hypotheses ("why"). The
+  catalog's own docstring already named this gap — "a future cross-workspace/
+  shared lexicon is a flag flip, not a rewrite" — but a lexicon of causal
+  theories about outcomes doesn't fit a file card's shape (path, kind, tags).
+  `hermes/almanac.py` mirrors skills.py's *global* half only (no project
+  scope — the whole point is that a lesson learned in one project is visible
+  in every other one) with catalog.py's *append-only, superseding-card* shape
+  (a later run can refine a hypothesis without erasing the trail).
+- **Triggered by a cheap heuristic, not every run.** `_looks_failed` (an
+  ERROR/DENIED prefix or a non-zero `exit code N`) mirrors the stuck guard's
+  own failure check — no LLM call spent deciding whether to spend an LLM
+  call. A clean run's outcomes are still logged (cheap, always useful as an
+  audit trail) but never handed to the pass. Reflecting on WHY something
+  *succeeded* — the operator's other stated interest — is a real idea but not
+  built here: the trigger would need to be "this succeeded in a way worth
+  remembering," which is a much fuzzier bar than "this visibly broke," and
+  firing on every clean run would swamp the operator's attention budget for
+  no proportionate return. Left as a documented gap, not a silent omission.
+- **"Expected" is measured, never fabricated.** The ledger pairs a tool call
+  with whatever prose the model *actually* wrote that turn — empty if it wrote
+  none. An empty expectation is real, useful signal (this action had no stated
+  reasoning behind it at all) — the pass isn't told to invent one.
+- **Real network reach, the one deliberate difference from retrospection's
+  posture.** Retrospection's write surface is explicitly "no shells, no
+  network... self-improvement never touches the world." This pass is the
+  documented exception, because the operator was explicit and repeated about
+  it. It's safe by the same mechanism already in the codebase, not a new one:
+  `http_request` itself gates every non-GET/HEAD call through `ctx.confirm`,
+  and GET/HEAD `http_request`/`web_search` are already the unconditional
+  auto-run tier everywhere else in Hermes (see ARCHITECTURE_NOTES.md's
+  permission-tier table) — so a confirm that always denies (same as
+  retrospection's) still lets real, read-only research through while refusing
+  anything that changes state on the web. No new trust decision, just the one
+  that already existed, applied to an unattended pass.
+- **Writing is exclusive to this pass, like `catalog_note`.** `load_almanac`
+  is a normal read tool in the main registry; `almanac_note` only exists in
+  the pass's own narrow registry. The doer doesn't curate the cross-project
+  long-term record mid-task — same split, same reasoning, as the catalog.
+- **On by default (`almanac_enabled`) — the third exception to the house
+  rule.** Same shape as Feature 13: shipped, then the operator's explicit
+  real-time call to turn it on, not left as a flag to discover. The network
+  research is disclosed here precisely because it's the part most worth an
+  operator's informed consent even under an explicit "turn it on" — reversible
+  with `config almanac_enabled false`.
+
+## Feature 15 — The narrator voice
+
+Origin: the operator, watching a live run with the village turned on, pointed
+out a real gap — nothing in the logs ever said a citizen existed. The village
+and the librarian are both fully wired (network, DNA, harvest; the catalog
+card pass), but their signal to an operator watching the screen was either
+silent (birth/harvest only ever printed a terse one-line `[village] citizen
+X born`) or indistinguishable from ordinary tool-call noise. The ask: an
+"outer voice" — the opposite number of the inner voice — that tells the tale
+of what's happening, in prose, sparingly, not on every tool call.
+
+- **A Hermes-owned tag, not a model-native one.** `<think>` works because
+  models are natively trained to emit it; `<narrate>` is not — nothing about
+  it is native to any served model, so the system/subagent prompts teach it
+  explicitly, the same way the toolbox catalog teaches tool names. It needs no
+  per-model variant table (unlike `THINK_RE`'s `<think>`/`<seed:think>`
+  handling), because Hermes itself defines what the tag looks like.
+- **Always stripped, conditionally shown — mirrors `<think>`'s split exactly.**
+  `strip_narrate` runs unconditionally on the visible reply, so a `<narrate>`
+  tag never leaks into the dense answer even with `narrator_enabled` off (the
+  model was taught the tag; the harness must still make good on "cut out
+  before the operator reads the technical answer" regardless of the flag).
+  Only the *printing and logging* — the part that costs the operator's
+  attention — is gated by the flag. Same shape as `inner_voice`/`show_thinking`,
+  inverted: inner voice is captured but never shown; the narrator voice is
+  shown but never fed back into context (so it can't steer a run, and can't be
+  used to smuggle instructions to a future turn either).
+- **Two sources, not one.** The model's own `<narrate>` text is opt-in *within*
+  a run (its discretion, "whenever he sees fit"), but the harness also
+  narrates the two hard village lifecycle events — a citizen's birth, its
+  harvest — unconditionally whenever they happen, in the same voice, gated
+  only by `narrator_enabled`. This directly closes the gap that motivated the
+  feature: an operator who never gets a model-authored `<narrate>` aside this
+  run still sees, in the same style, that a citizen was born and its watch
+  ended — the harness narrates what it already knows happened, it doesn't wait
+  on the model to mention it.
+- **Red, per the operator's explicit ask — twice.** The first draft used a new
+  `blue` instead, on the grounds that `red` already means "something failed" in
+  this palette (verification FAILED, an abort, an uncaught exception) and
+  overloading it would make flavor text and error text visually indistinguishable
+  at a glance. The operator asked for "red inked narration" in the original
+  request and again after the first version shipped in blue — a real, repeated
+  preference outranks a not-yet-observed readability worry. Reverted to `red`
+  and removed the unused `blue` entry from `hermes/ui.py`. If the error/flavor
+  overlap turns out to bite in practice, the fix is a prefix (`[!]` vs `✦`), not
+  a color swap back.
+- **`DEBATE_FRAMING`/`IMPROVE_FRAMING` now say the narrator voice is still
+  available.** Both are appended to the system prompt via `extra_system`
+  *after* `system.md`'s own narrator-voice section, and both frame the sitting
+  as "reason out loud in plain language" — close enough to "use `<narrate>`
+  sparingly" that the model was reliably reading it as a demotion of the
+  outer voice rather than a mode where it's simply less likely to be used. Made
+  it explicit in the framing text instead of leaving it to be inferred against
+  a competing instruction.
+- **Filed to `narration.jsonl`, mirroring `thinking.jsonl`.** "Where there was
+  data, there will be data" applies here too, even though — unlike the inner
+  voice — this text was never hidden from the operator's screen in the first
+  place. The dedicated page is for retrieval after the fact (a run replayed
+  later, or scripted into audio) without grepping the full transcript.
+- **On by default (`narrator_enabled`) — the fourth exception to the house
+  rule.** Same shape as Features 13 and 14: the operator's real-time, explicit
+  ask, not a flag left to discover. It costs nothing when the model doesn't
+  use `<narrate>` (a regex pass over already-generated text) and the village
+  lifecycle lines are one `print` each — reversible with
+  `config narrator_enabled false`.
+
 ## Inner voice + waking the memory loop (Genesis session)
 
 - **Inner voice (`inner_voice`, on).** The model's `<think>` reasoning was already
@@ -471,3 +701,132 @@ per-body filesystems are deliberately deferred.
   written — `agent.py` writes `summary.md` unconditionally with a forced/stubbed
   fallback; that complaint was a house not yet opened, not a missing feature.) Each
   flag remains individually reversible.
+
+## Feature 16 — The librarian memo
+
+Origin: the operator, after watching a run get stuck reinforcing its own past
+mistake, pointed out that the almanac index was there but passive — "he's not
+really picking up on the librarian's work." A smaller/denser model that has
+just re-read its own RUN SUMMARIES/NOTES/LAST REPLY (all its own prior output,
+right there in the user message) will keep pattern-matching onto its own
+history even when a system-prompt index buried after skills/persona holds the
+actual fix. The ask, in the operator's words: something like a memo the
+librarian writes that the agent reads "at the beginning of each one of his
+[runs]" — not another mid-loop voice, just make sure what the librarian found
+actually reaches him before he repeats himself.
+
+- **A second surface, not a replacement for the index.** `almanac.index()` in
+  the system prompt stays — it's the durable, always-there menu for an ad hoc
+  `load_almanac` lookup mid-run. The memo (`almanac.new_since`) is additive:
+  full claim + hypothesis (not just the claim), and only for cards touched
+  since this *project's* own last run — a fresh project sees the whole
+  backlog once; a project that's been running a while sees only what's new.
+- **Placed last in the user message, right next to `# CURRENT REQUEST`.**
+  RUN SUMMARIES/LAST REPLY/NOTES sit earlier and are the agent's own past
+  output — the very thing that was drowning out the librarian's findings.
+  Putting the memo immediately before the actual request, not folded into the
+  system-prompt tail with skills/persona, was the direct fix: unmissable, and
+  positioned right where attention is highest.
+- **A per-project cursor, not a global one.** `Project.almanac_cursor()` /
+  `set_almanac_cursor()` (a plain `.almanac_seen` file, mirroring the shape of
+  `.equipped.json`/`.approved.json`) track the newest almanac id *this
+  project* has already been shown. Global would mean whichever project ran
+  most recently silently marks a finding "seen" for every other project too —
+  wrong, since the whole point of the almanac is that a lesson from one
+  project should still land, in full, on every other project's next run.
+- **The cursor advances in `agent.run`, not inside `package.assemble`.**
+  `assemble` reads project state and stays a pure function of it (same as the
+  catalog digest, skills index, almanac index it already reads) — advancing
+  the cursor is a side effect of a real run happening, not of building a
+  package, so it's a separate step right after `assemble` is called for the
+  actual run. Calling `assemble` twice for the same run (estimation, a
+  preview, a test) can't silently burn the memo.
+- **Delivered once, not held open.** The cursor advances the instant the
+  package is built for a run, whether or not that run's model turns out to
+  actually read the memo. Same posture as the operator prompt itself: told
+  once, not nagged — `load_almanac` remains available for anything that needs
+  a second look later.
+- **Peer-to-peer phrasing, not a directive.** First draft read "read this
+  before repeating an approach" — an order handed down, not information
+  passed between colleagues. The operator asked for the tone of "two equals
+  having a professional conversation." Reworded to "a colleague's notes, not
+  an order" plus "use your own judgment on whether it applies" — the memo
+  still gets the agent's attention (it's new, it's unmissable), it just
+  doesn't instruct the agent what to conclude from it.
+- **On whenever `almanac_enabled` is** — no separate flag. This is the fix to
+  a gap in Feature 14's own delivery mechanism, not a new opt-in decision;
+  `config almanac_enabled false` turns off both the index and the memo
+  together, same as before.
+
+
+## Feature 17 — The librarian's magazine (king of the night)
+
+Origin: the operator, watching the agent in `debate` mode "keep coming back at
+the same strat — he repeats his own mistakes." The diagnosis was mechanical.
+The almanac's own end-of-run pass (Feature 14) only fires when this run's
+outcomes ledger shows a real failure — `_looks_failed` keys off ERROR/DENIED or
+a nonzero exit code. But a debate turn is *pure prose*: no tool call, no exit
+code. A strategically dead line looks clean, so nothing is ever banked, and
+since every turn is a fresh model instance with no conversation memory, the next
+turn re-proposes it. The librarian was asleep exactly when it was needed most.
+
+The operator's framing: make the librarian "the king of the night versus the
+agent, the king of the day." Behind the agent at the end of each turn; *ahead*
+of it at the start of the next — handing over a written brief (a "magazine",
+formerly "the memo") that says what the librarian knows before the agent walks
+into a high-intensity loop. And give it a plan to check moves against.
+
+- **`strategy.md` — a distinct campaign-plan file, and the LIBRARIAN's, not the
+  operator's.** Mission is the standing purpose; directives are standing
+  instructions (recency-reconciled); the strategy is the *current line* the
+  day-to-day moves should serve. The operator owns the mission and nothing here
+  — the librarian owns the strategy: it sets it (from the mission, the almanac,
+  and the agent's runs) and refines it when the line drifts, via a `write_strategy`
+  tool in the morning pass's own registry. The agent reads it as authoritative (a
+  `# STRATEGY` section right after `# MISSION`); the `strategy` CLI command is
+  view-only. Deliberately **not** auto-created in `ensure_layout` — absent, and
+  read as empty, until the librarian first writes one. That keeps the change
+  zero-blast-radius for every existing project and test: no strategy file, no new
+  section. (The operator's stated intent is to build role structure on top of
+  this — e.g. a dedicated "general" agent who owns the strategy — so ownership
+  lives in a tool + a prompt, not hardwired to the librarian.)
+
+- **Two passes, the two halves of the same character** (`hermes/magazine.py`):
+  - *Morning (`compose`)* — synchronous, before `package.assemble`, so the brief
+    exists when the package is built. Reads strategy + mission + directives + the
+    agent's own recent summaries + the almanac; researches (web_search / GET
+    http_request) only when a fact would change the move; writes `magazine.md`.
+    Its stated first job is to catch the agent about to repeat a line already
+    found wanting.
+  - *Night (`register_attempt`)* — end of turn, inside `_librarian_passes`. Reads
+    the line the agent actually argued (its verbatim reply) and banks it to the
+    almanac. This is what closes Feature 14's debate blind spot: it's the only
+    record that a clean-looking prose line was tried, which is what lets the next
+    morning's brief say "you already argued this."
+
+- **The magazine stands in for the new-since memo, doesn't stack on it.** When a
+  magazine is in hand, `assemble` injects it in the same pre-request slot the
+  Feature 16 memo used and skips the raw `new_since` dump — the librarian already
+  reasoned over the almanac, so the agent gets one considered page, not two. Same
+  "colleague's brief, not an order" posture as the memo.
+
+- **Same store, same posture as the almanac.** The night pass banks through
+  `almanac_note` into the one global almanac — a repeated line refines its card
+  (Feature 14's supersede-don't-erase) rather than spawning a new one. Both
+  passes use their own narrow registry, a confirm that fails closed (so only
+  read-only GET research gets through), and never raise — a failed pass is a
+  no-op and the turn's result stands.
+
+- **Debate-scoped, behind `magazine_enabled` (off by default), threaded via a
+  `mode` argument.** `agent.run(..., mode="debate")` (set by `cmd_debate`) is the
+  gate for both passes; every other caller and every test is unchanged. The
+  morning pass adds a real LLM round-trip *before* each debate turn — that cost
+  (the librarian getting ahead) is the whole point, and it's why this is opt-in
+  and scoped to the one mode built for unhurried reasoning rather than every run.
+
+- **Ordering makes the loop close on its own.** In debate the end-of-turn passes
+  run in the background (`background_housekeeping`); the next turn's
+  `flush_housekeeping` joins them *before* it composes — so tonight's registered
+  line is already in the almanac when tomorrow's brief reads it. No extra
+  plumbing; it falls out of the Phase-2 correctness barrier that was already
+  there.

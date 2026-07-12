@@ -17,6 +17,8 @@ import json
 import time
 from dataclasses import dataclass, field
 
+from hermes.ui import dim, heartbeat, yellow
+
 
 @dataclass
 class ToolCall:
@@ -38,17 +40,47 @@ class LLMTransportError(Exception):
 class OpenAIBackend:
     RETRY_DELAYS = (1, 3, 8)
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, *, timeout=None, retry_delays=None, quiet=False):
         import httpx
 
         self._httpx = httpx
         self.cfg = cfg
+        # quiet suppresses the heartbeat + retry chatter. The heartbeat is
+        # proof-of-life for a call the OPERATOR is blocked on; a call made from
+        # the background housekeeping thread (Phase 2) blocks no one — the
+        # operator already has their prompt — so it must stay silent instead of
+        # printing "waiting on the model" into the REPL under their cursor.
+        self._quiet = quiet
+        # retry_delays lets a bounded sibling (see .housekeeping()) turn off the
+        # retry ladder entirely; None = the class default for real turns.
+        if retry_delays is not None:
+            self.RETRY_DELAYS = tuple(retry_delays)
         base_url = (cfg.get("base_url") or "").rstrip("/")
         self.url = f"{base_url}/chat/completions"
+        eff_timeout = timeout if timeout is not None else cfg.get("llm_timeout", 300)
         self.client = httpx.Client(
             headers={"Authorization": f"Bearer {cfg.get('api_key', 'hermes')}"},
-            timeout=300,
+            timeout=float(eff_timeout or 300),
         )
+
+    def housekeeping(self, *, quiet=False):
+        """A bounded sibling for the librarian's side-passes — catalog
+        enrichment, the almanac, retrospection, directive reconciliation, the
+        skills nudge. Those run between the operator and their next prompt and
+        are explicitly conveniences; they must NOT inherit a real turn's long
+        `llm_timeout` or its retry ladder. Left to, a single slow completion
+        on a loaded box blocks the REPL for the better part of an hour
+        (llm_timeout × 4 attempts). Short timeout, single attempt: on a slow
+        box the pass raises LLMTransportError, its caller no-ops, and the run's
+        result — already fixed by the time these fire — simply stands.
+
+        `quiet=True` also silences the heartbeat: the three passes that run in
+        the background thread (Phase 2) block no one, so their "waiting on the
+        model" ticks must not print into the operator's live prompt. The
+        synchronous foreground passes (reconcile, skills nudge) keep quiet
+        False — the operator IS waiting on those, so the proof-of-life stays."""
+        t = self.cfg.get("housekeeping_timeout", 120) or 120
+        return OpenAIBackend(self.cfg, timeout=float(t), retry_delays=(), quiet=quiet)
 
     def chat(self, messages, tools=None, tool_choice=None) -> ChatResult:
         sampling = self.cfg.get("sampling", {})
@@ -71,12 +103,24 @@ class OpenAIBackend:
         if tool_choice:
             body["tool_choice"] = tool_choice
 
+        hb_printer = (lambda *a, **k: None) if self._quiet else print
         last_error = None
-        for delay in (0,) + self.RETRY_DELAYS:
+        for attempt, delay in enumerate((0,) + self.RETRY_DELAYS, start=1):
+            if delay and not self._quiet:
+                print(yellow(
+                    f"  vLLM/llama.cpp call failed ({last_error}) — "
+                    f"retrying in {delay}s (attempt {attempt}/{1 + len(self.RETRY_DELAYS)})"
+                ))
             if delay:
                 time.sleep(delay)
             try:
-                resp = self.client.post(self.url, json=body)
+                # A single completion can legitimately take minutes (a large
+                # context to reprocess, a slow box) with nothing to show for
+                # it until the whole response lands — the heartbeat is the
+                # only thing standing between that and looking dead. Silenced
+                # for a background (quiet) backend: no operator is blocked on it.
+                with heartbeat("waiting on the model", printer=hb_printer):
+                    resp = self.client.post(self.url, json=body)
                 if resp.status_code >= 500:
                     last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
                     continue
@@ -127,6 +171,10 @@ class MockBackend:
     def __init__(self, script: list | None = None):
         self.script = list(script or [])
         self._counter = 0
+
+    def housekeeping(self, *, quiet=False):
+        # Nothing to bound or silence in-process; reuse the same script.
+        return self
 
     def _tc(self, name: str, args: dict) -> ToolCall:
         self._counter += 1

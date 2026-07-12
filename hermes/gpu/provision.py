@@ -16,6 +16,7 @@ Both write ~/vllm.pid and ~/vllm.log so `gpu status`/`down` stay runtime-agnosti
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 import time
 from dataclasses import dataclass, field
@@ -50,6 +51,52 @@ LLAMA_REPO = "https://github.com/ggml-org/llama.cpp"
 
 class ProvisionError(Exception):
     pass
+
+
+# Freshly booted boxes often have cloud-init or unattended-upgrades holding the
+# dpkg/apt lock for the first minute or two. Rather than dying on the first
+# collision (`Could not get lock ... held by process N`), retry for up to 5
+# minutes; any other apt failure (missing package, etc.) still fails fast.
+_APT_WAIT_FN = (
+    "apt_wait() { "
+    "for _i in $(seq 1 60); do "
+    "apt-get \"$@\" 2>/tmp/.hermes_apt_err && return 0; "
+    "grep -q 'Could not get lock\\|is held by process' /tmp/.hermes_apt_err "
+    "|| { cat /tmp/.hermes_apt_err >&2; return 1; }; "
+    "sleep 5; "
+    "done; "
+    "cat /tmp/.hermes_apt_err >&2; return 1; "
+    "}; "
+)
+
+# Freshly rented boxes sometimes come up with the network stack (systemd-resolved,
+# DHCP-pushed resolv.conf) still settling, so the very first outbound call — here,
+# cloning llama.cpp — can hit "Could not resolve host" / "Temporary failure in name
+# resolution" before DNS is actually ready. Retry those specific transient errors
+# for up to 2 minutes; anything else (bad URL, auth, disk full) still fails fast.
+_NET_WAIT_FN = (
+    "net_wait() { "
+    "for _i in $(seq 1 24); do "
+    '"$@" 2>/tmp/.hermes_net_err && return 0; '
+    "grep -qiE 'could not resolve host|temporary failure in name resolution|"
+    "network is unreachable|could not connect to|connection timed out' "
+    "/tmp/.hermes_net_err "
+    "|| { cat /tmp/.hermes_net_err >&2; return 1; }; "
+    "sleep 5; "
+    "done; "
+    "cat /tmp/.hermes_net_err >&2; return 1; "
+    "}; "
+)
+
+
+def _extra_args(cfg, key: str) -> list[str]:
+    """`config set extra_vllm_args "--foo bar"` stores a plain string (the CLI's
+    `config set` has no list syntax), not the list the default is typed as.
+    Split it like a shell would rather than iterating it character-by-character."""
+    val = cfg.get(key, [])
+    if isinstance(val, str):
+        return shlex.split(val)
+    return [str(a) for a in val]
 
 
 @dataclass
@@ -139,7 +186,7 @@ def vllm_command(cfg, plan: ServePlan, spec: ModelSpec | None = None) -> str:
     ]
     if spec.tokenizer:
         parts.append(f"--tokenizer {spec.tokenizer}")
-    parts += [str(a) for a in cfg.get("extra_vllm_args", [])]
+    parts += _extra_args(cfg, "extra_vllm_args")
     return " ".join(parts)
 
 
@@ -164,17 +211,18 @@ def llama_command(cfg, plan: ServePlan, spec: ModelSpec | None = None) -> str:
         "--n-gpu-layers 999",  # offload all layers; harmless if the model has fewer
         "--jinja",
     ]
-    parts += [str(a) for a in cfg.get("extra_llama_args", [])]
+    parts += _extra_args(cfg, "extra_llama_args")
     return " ".join(parts)
 
 
 def _install_vllm(endpoint) -> None:
     print(dim("ensuring vLLM is installed (first time can take a few minutes)..."))
     install = (
+        _APT_WAIT_FN +
         f"test -x {VLLM_BIN} && exit 0; "
         # python3-venv is missing on some base images — install it on demand.
         f"python3 -m venv --system-site-packages {VENV_DIR} 2>/dev/null || "
-        f"{{ apt-get update -qq && apt-get install -y -qq python3-venv && "
+        f"{{ apt_wait update -qq && apt_wait install -y -qq python3-venv && "
         f"python3 -m venv --system-site-packages {VENV_DIR}; }} && "
         f"{VENV_DIR}/bin/pip install -q -U pip vllm hf_transfer"
     )
@@ -186,23 +234,37 @@ def _install_vllm(endpoint) -> None:
 def _install_llama(endpoint) -> None:
     print(dim("ensuring llama.cpp is built with CUDA (first time can take several minutes)..."))
     install = (
+        _APT_WAIT_FN + _NET_WAIT_FN +
         f"test -x {LLAMA_BIN} && exit 0; "
         f"mkdir -p {LLAMA_DIR} && "
-        "apt-get update -qq && apt-get install -y -qq "
+        "apt_wait update -qq && apt_wait install -y -qq "
         "git cmake build-essential libcurl4-openssl-dev && "
         f"rm -rf {LLAMA_DIR}/src && "
-        f"git clone --depth 1 {LLAMA_REPO} {LLAMA_DIR}/src && "
+        f"net_wait git clone --depth 1 {LLAMA_REPO} {LLAMA_DIR}/src && "
+        # Build CUDA kernels only for the GPU actually on the box, not the whole
+        # architecture matrix llama.cpp compiles by default — the difference is
+        # tens of minutes of nvcc on a first serve. `compute_cap` like "9.0"
+        # (Hopper/H200) → "90" for CMAKE_CUDA_ARCHITECTURES. If the probe finds
+        # nothing, the flag drops out and llama.cpp's default arch list stands.
+        "CUDA_ARCH=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader "
+        "2>/dev/null | head -1 | tr -d '. '); "
         f"cmake -S {LLAMA_DIR}/src -B {LLAMA_DIR}/src/build "
-        "-DGGML_CUDA=ON -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release && "
+        "-DGGML_CUDA=ON -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release "
+        "${CUDA_ARCH:+-DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH} && "
         f"cmake --build {LLAMA_DIR}/src/build --config Release -j --target llama-server && "
         f"cp {LLAMA_DIR}/src/build/bin/llama-server {LLAMA_BIN}"
     )
     rc, _, err = endpoint.run(install, timeout=3600)
     if rc != 0:
-        raise ProvisionError(
-            f"llama.cpp build failed: {err.strip()[-800:]} "
-            "(needs the CUDA toolkit — use a CUDA-devel image, not runtime-only)"
-        )
+        err = err.strip()
+        low = err.lower()
+        if "resolve host" in low or "name resolution" in low or "network is unreachable" in low:
+            hint = " (the box has no working outbound network/DNS — re-attach or rent a different box)"
+        elif "nvcc" in low or "cuda" in low:
+            hint = " (needs the CUDA toolkit — use a CUDA-devel image, not runtime-only)"
+        else:
+            hint = ""
+        raise ProvisionError(f"llama.cpp build failed: {err[-800:]}{hint}")
 
 
 def launch(endpoint, cfg, plan: ServePlan, spec: ModelSpec | None = None) -> None:

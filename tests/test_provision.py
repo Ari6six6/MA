@@ -74,6 +74,30 @@ def test_vllm_command_uses_venv_binary(cfg):
     assert vllm_command(cfg, plan).startswith(f"{VLLM_BIN} serve ")
 
 
+def test_extra_vllm_args_as_shell_string(cfg):
+    # `config set extra_vllm_args "--foo bar"` stores a plain string (there's
+    # no list syntax on the CLI) — it must be split into flags, not iterated
+    # character-by-character.
+    cfg.set("extra_vllm_args", "--enforce-eager --disable-custom-all-reduce", coerce=False)
+    plan = plan_serve([("NVIDIA H200", 143771)], cfg)
+    cmd = vllm_command(cfg, plan)
+    assert "--enforce-eager --disable-custom-all-reduce" in cmd
+
+
+def test_extra_llama_args_as_shell_string(cfg):
+    cfg.set("extra_llama_args", "--flash-attn --no-mmap", coerce=False)
+    spec = get_spec("qwen")
+    plan = plan_serve([("RTX 4090", 24564)], cfg, spec)
+    cmd = llama_command(cfg, plan, spec)
+    assert "--flash-attn --no-mmap" in cmd
+
+
+def test_extra_vllm_args_still_accepts_a_list(cfg):
+    cfg.set("extra_vllm_args", ["--enforce-eager"], coerce=False)
+    plan = plan_serve([("NVIDIA H200", 143771)], cfg)
+    assert "--enforce-eager" in vllm_command(cfg, plan)
+
+
 def test_launch_installs_into_isolated_venv(cfg):
     from conftest import FakeEndpoint
 
@@ -136,6 +160,43 @@ def test_qwen_serves_on_native_llama_cpp(cfg):
     assert "--n-gpu-layers" in cmd
 
 
+def test_glm_serves_fp16_gguf_on_llama_cpp(cfg):
+    from hermes.models import get_spec
+
+    spec = get_spec("glm")
+    assert spec.server == "llama_cpp"  # FP16 GGUF → native runtime, not vLLM
+    assert spec.supports_forced_tool_choice is False  # llama.cpp under --jinja
+    # ~62GB of FP16 weights → needs a big box; serve it on an H200-class card.
+    plan = plan_serve([("NVIDIA H200", 143771)], cfg, spec)
+    cmd = llama_command(cfg, plan, spec)
+    assert cmd.startswith(f"{LLAMA_BIN} ")
+    assert "--hf-repo HauhauCS/GLM-4.7-Flash-Uncensored-HauhauCS-Balanced" in cmd
+    # exact FP16 filename, not a quant tag → --hf-file, not -hf repo:QUANT
+    assert "--hf-file GLM-4.7-Flash-Uncensored-HauhauCS-Balanced-FP16.gguf" in cmd
+    assert "--jinja" in cmd  # OpenAI tool calls from GLM's own chat template
+    assert "--alias glm-4.7-flash" in cmd
+
+
+def test_glm_context_scales_with_a_bigger_card(cfg):
+    from hermes.models import get_spec
+
+    spec = get_spec("glm")
+    # H100 NVL (~93GB): comfortably past the ~62GB weights → 65K, not the old 32K.
+    assert plan_serve([("NVIDIA H100 NVL", 95830)], cfg, spec).max_model_len == 65536
+    # An 80GB card stays tighter — weights leave ~18GB for KV.
+    assert plan_serve([("NVIDIA A100-SXM4-80GB", 81920)], cfg, spec).max_model_len == 32768
+    # H200-class (~140GB): the full native 128K context.
+    assert plan_serve([("NVIDIA H200", 143771)], cfg, spec).max_model_len == 131072
+
+
+def test_glm_too_small_box_rejected(cfg):
+    # A single 48GB card is well below the ~62GB FP16 floor.
+    from hermes.models import get_spec
+
+    with pytest.raises(ProvisionError):
+        plan_serve([("RTX 6000 Ada", 49140)], cfg, get_spec("glm"))
+
+
 def test_launch_llama_builds_with_cuda_then_serves(cfg):
     from conftest import FakeEndpoint
     from hermes.models import get_spec
@@ -151,10 +212,97 @@ def test_launch_llama_builds_with_cuda_then_serves(cfg):
 
     build = ep.calls[1]
     assert "llama.cpp" in build and "GGML_CUDA=ON" in build
+    # Build only for the box's own GPU arch, not llama.cpp's whole default
+    # matrix — that's the difference between a ~5-min and a ~30-min first serve.
+    assert "nvidia-smi --query-gpu=compute_cap" in build
+    assert "-DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH" in build
     assert VENV_DIR not in build  # the native build, not the vLLM venv
+    # apt-get runs through the lock-wait wrapper, not raw, so a freshly booted
+    # box's cloud-init/unattended-upgrades apt lock gets retried instead of
+    # failing the whole provision on the first collision.
+    assert "apt_wait update -qq && apt_wait install" in build
+    assert "apt-get update -qq && apt-get install" not in build
     # Launched the native server with tool-calling on.
     assert ep.calls[3].startswith("HF_HUB_ENABLE_HF_TRANSFER=1 nohup " + LLAMA_BIN)
     assert "--jinja" in ep.calls[3]
+
+
+def test_llama_build_failure_only_hints_cuda_when_relevant(cfg):
+    from conftest import FakeEndpoint
+    from hermes.models import get_spec
+
+    spec = get_spec("qwen")
+    plan = plan_serve([("RTX 4090", 24564)], cfg, spec)
+
+    # An apt-lock collision (already retried and still failing) isn't a missing
+    # CUDA toolkit — don't tack on a misleading hint that sends the operator
+    # chasing the wrong problem.
+    ep = FakeEndpoint([
+        (0, "", ""),
+        (1, "", "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1258 (apt-get)"),
+    ])
+    with pytest.raises(ProvisionError) as exc:
+        launch(ep, cfg, plan, spec)
+    assert "CUDA toolkit" not in str(exc.value)
+
+    # A genuine missing-nvcc failure still gets the hint.
+    ep = FakeEndpoint([
+        (0, "", ""),
+        (1, "", "CMake Error: nvcc not found"),
+    ])
+    with pytest.raises(ProvisionError) as exc:
+        launch(ep, cfg, plan, spec)
+    assert "CUDA toolkit" in str(exc.value)
+
+
+def test_launch_llama_wraps_clone_in_net_wait(cfg):
+    from conftest import FakeEndpoint
+    from hermes.models import get_spec
+
+    spec = get_spec("qwen")
+    ep = FakeEndpoint([
+        (0, "", ""),  # not running
+        (0, "", ""),  # build llama.cpp
+        (0, "", ""),  # mkdir workspace
+        (0, "", ""),  # launch
+    ])
+    launch(ep, cfg, plan_serve([("RTX 4090", 24564)], cfg, spec), spec)
+
+    build = ep.calls[1]
+    # A freshly booted box's DNS can lag the network coming up; the clone must
+    # retry transient resolution failures instead of dying on the first one.
+    assert "net_wait git clone --depth 1" in build
+    assert "&& git clone --depth 1" not in build  # unwrapped, raw clone
+
+
+def test_llama_build_failure_hints_network_when_dns_is_the_cause(cfg):
+    from conftest import FakeEndpoint
+    from hermes.models import get_spec
+
+    spec = get_spec("qwen")
+    plan = plan_serve([("RTX 4090", 24564)], cfg, spec)
+
+    # A DNS failure that outlasted the retry loop is a box-network problem, not
+    # a CUDA one — the hint must point at the real cause.
+    ep = FakeEndpoint([
+        (0, "", ""),
+        (1, "", "fatal: unable to access 'https://github.com/ggml-org/llama.cpp/': "
+                "Could not resolve host: github.com"),
+    ])
+    with pytest.raises(ProvisionError) as exc:
+        launch(ep, cfg, plan, spec)
+    assert "outbound network/DNS" in str(exc.value)
+    assert "CUDA toolkit" not in str(exc.value)
+
+
+def test_vllm_install_uses_apt_wait(cfg):
+    from conftest import FakeEndpoint
+
+    ep = FakeEndpoint([(0, "", ""), (0, "", ""), (0, "", ""), (0, "", "")])
+    launch(ep, cfg, plan_serve([("NVIDIA H200", 143771)], cfg))
+    install = ep.calls[1]
+    assert "apt_wait update -qq && apt_wait install" in install
+    assert "apt-get update -qq && apt-get install" not in install
 
 
 def test_qwen_official_serves_fp8_on_vllm(cfg):

@@ -5,7 +5,8 @@ from hermes.llm import MockBackend
 
 
 def run_agent(project, cfg, script, confirm=None, gpu=None, sandbox=None,
-              inbox_path=None, on_run_started=None, show_thinking=False):
+              inbox_path=None, on_run_started=None, show_thinking=False,
+              ask_operator_fn=None):
     backend = MockBackend(script)
     return agent.run(
         project,
@@ -19,6 +20,7 @@ def run_agent(project, cfg, script, confirm=None, gpu=None, sandbox=None,
         inbox_path=inbox_path,
         on_run_started=on_run_started,
         show_thinking=show_thinking,
+        ask_operator_fn=ask_operator_fn,
     )
 
 
@@ -171,6 +173,81 @@ def test_turn_cap_forces_handoff_summary(project, cfg):
     assert result.turns == 2
     # cap aborts still get a real model-written summary, not the stub
     assert result.summary == "[mock] run done."
+
+
+def _metrics(project, run_id=1):
+    path = project.runs_dir / f"{run_id:04d}" / "metrics.json"
+    return json.loads(path.read_text())
+
+
+def test_reflect_nudge_on_by_default(project, cfg):
+    # On by default (the operator's explicit call): a chain of silent tool-only
+    # turns reaching the default streak (4) gets bounced with no cfg.set at all.
+    script = [{"tool": "write_note", "args": {"text": f"n{i}"}} for i in range(4)]
+    script.append({"tool": "finish_run", "args": {"summary": "done"}})
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    assert _metrics(project)["reflect_nudges"] == 1
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "Stop and think now" in transcript
+
+
+def test_reflect_nudge_can_be_disabled(project, cfg):
+    cfg.set("reflect_nudge_enabled", False)
+    script = [{"tool": "write_note", "args": {"text": f"n{i}"}} for i in range(6)]
+    script.append({"tool": "finish_run", "args": {"summary": "done"}})
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    assert _metrics(project)["reflect_nudges"] == 0
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "Stop and think now" not in transcript
+
+
+def test_reflect_nudge_fires_after_silent_chain(project, cfg):
+    cfg.set("reflect_nudge_enabled", True)
+    cfg.set("reflect_nudge_every", 3)
+    cfg.set("reflect_nudges", 2)
+    script = [
+        {"tool": "write_note", "args": {"text": "n1"}},  # silent (1)
+        {"tool": "write_note", "args": {"text": "n2"}},  # silent (2)
+        {"tool": "write_note", "args": {"text": "n3"}},  # silent (3) -> nudge fires
+        {"tool": "finish_run", "args": {"summary": "done"}},
+    ]
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "Stop and think now" in transcript
+    assert _metrics(project)["reflect_nudges"] == 1
+
+
+def test_reflect_nudge_streak_resets_on_real_prose(project, cfg):
+    cfg.set("reflect_nudge_enabled", True)
+    cfg.set("reflect_nudge_every", 3)
+    cfg.set("reflect_nudges", 2)
+    long_prose = "x" * 60  # >= REFLECT_MIN_PROSE_CHARS, resets the streak
+    script = [
+        {"tool": "write_note", "args": {"text": "n1"}},  # silent (1)
+        {"tool": "write_note", "args": {"text": "n2"}},  # silent (2)
+        {"tool": "write_note", "args": {"text": "n3"}, "say": long_prose},  # resets
+        {"tool": "write_note", "args": {"text": "n4"}},  # silent (1)
+        {"tool": "write_note", "args": {"text": "n5"}},  # silent (2)
+        {"tool": "finish_run", "args": {"summary": "done"}},
+    ]
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    # 5 silent-ish turns total, but the streak never reaches 3 without a reset
+    assert _metrics(project)["reflect_nudges"] == 0
+
+
+def test_reflect_nudge_budget_does_not_loop_forever(project, cfg):
+    cfg.set("reflect_nudge_enabled", True)
+    cfg.set("reflect_nudge_every", 1)  # fires on every silent turn
+    cfg.set("reflect_nudges", 2)  # but capped at 2 for the whole run
+    script = [{"tool": "write_note", "args": {"text": f"n{i}"}} for i in range(5)]
+    script.append({"tool": "finish_run", "args": {"summary": "done"}})
+    result = run_agent(project, cfg, script)
+    assert not result.aborted
+    assert _metrics(project)["reflect_nudges"] == 2  # budget exhausted, not unbounded
 
 
 def test_stub_summary_when_backend_dies(project, cfg):
@@ -399,6 +476,14 @@ def test_think_blocks_stripped():
     assert agent.strip_think(None) == ""
 
 
+def test_narrate_blocks_stripped():
+    assert agent.strip_narrate("<narrate>a tale</narrate>answer") == "answer"
+    assert agent.strip_narrate(None) == ""
+    assert agent.extract_narrate(
+        "<narrate>first</narrate>mid<narrate>second</narrate>"
+    ) == ["first", "second"]
+
+
 def test_empty_finish_summary_falls_back_to_real_handoff(project, cfg):
     # finish_run with a whitespace-only summary used to slip past the
     # never-lose-the-handoff fallback (it guarded on `is None`, but the summary
@@ -450,6 +535,39 @@ def test_inner_voice_can_be_disabled(project, cfg):
     assert not (project.runs_dir / "0001" / "thinking.jsonl").exists()
 
 
+def test_narrator_voice_printed_and_logged(project, cfg, capsys):
+    # <narrate> is the outer voice: shown to the operator (unlike <think>) but
+    # cut out of the dense reply and filed to its own page.
+    result = run_agent(
+        project, cfg,
+        [{"tool": "finish_run", "args": {"summary": "done"},
+          "say": "<narrate>a citizen stirs in the dome</narrate>the file is written"}],
+    )
+    out = capsys.readouterr().out
+    assert "a citizen stirs in the dome" in out
+    assert "<narrate>" not in result.final_text
+    assert result.final_text == "the file is written"
+    nj = project.runs_dir / "0001" / "narration.jsonl"
+    assert nj.exists()
+    assert "a citizen stirs in the dome" in nj.read_text()
+
+
+def test_narrator_can_be_disabled(project, cfg, capsys):
+    # Off: the aside is discarded, not just unlogged — and never leaks into the
+    # dense reply as a raw, unparsed tag.
+    cfg.set("narrator_enabled", False)
+    result = run_agent(
+        project, cfg,
+        [{"tool": "finish_run", "args": {"summary": "done"},
+          "say": "<narrate>quiet</narrate>the file is written"}],
+    )
+    out = capsys.readouterr().out
+    assert "quiet" not in out
+    assert "<narrate>" not in result.final_text
+    assert result.final_text == "the file is written"
+    assert not (project.runs_dir / "0001" / "narration.jsonl").exists()
+
+
 def test_on_run_started_callback_fires_with_run_id_and_dir(project, cfg):
     captured = []
     run_agent(
@@ -491,6 +609,57 @@ def test_inbox_none_is_a_no_op(project, cfg):
     # inbox_path defaults to None (every existing caller) — must not error.
     result = run_agent(project, cfg, [{"tool": "finish_run", "args": {"summary": "done"}}])
     assert result.summary == "done"
+
+
+def test_ask_operator_is_not_a_builtin(project, cfg):
+    # The dialogue tool is added by agent.run only when a live inbox exists; it
+    # must never be a plain builtin (that would let a channel-less run offer a
+    # tool that can only ever fall back).
+    from hermes.tools import build_registry, dialogue
+
+    base = build_registry(project, cfg, lambda *a, **k: True)
+    assert "ask_operator" not in base.names()
+    assert [t.name for t in dialogue.TOOLS] == ["ask_operator"]
+
+
+def test_ask_operator_runs_end_to_end_and_falls_back_when_unanswered(
+    project, cfg, tmp_path
+):
+    cfg.set("stall_nudges", 0)
+    cfg.set("ask_operator_timeout", 0)  # empty inbox -> immediate fallback, no wait
+    inbox = tmp_path / "inbox.jsonl"  # exists as a channel, but no message waiting
+    inbox.write_text("")
+
+    result = run_agent(
+        project, cfg,
+        [
+            {"tool": "ask_operator", "args": {"question": "which database?"}},
+            {"tool": "finish_run", "args": {"summary": "picked sqlite myself"}},
+        ],
+        inbox_path=inbox,
+    )
+    assert not result.aborted
+    assert result.summary == "picked sqlite myself"
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "ask_operator" in transcript
+    assert "No reply" in transcript  # the graceful fallback reached the model
+
+
+def test_ask_operator_foreground_reads_the_keyboard_reply(project, cfg):
+    # A foreground session supplies ask_operator_fn; the agent's question gets a
+    # direct keyboard answer that flows back into the run.
+    cfg.set("stall_nudges", 0)
+    result = run_agent(
+        project, cfg,
+        [
+            {"tool": "ask_operator", "args": {"question": "which db?"}},
+            {"tool": "finish_run", "args": {"summary": "used postgres as told"}},
+        ],
+        ask_operator_fn=lambda q: "postgres, obviously",
+    )
+    assert not result.aborted
+    transcript = (project.runs_dir / "0001" / "transcript.jsonl").read_text()
+    assert "postgres, obviously" in transcript  # the reply reached the model
 
 
 def test_show_thinking_prints_inner_voice_when_enabled(project, cfg, capsys):

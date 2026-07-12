@@ -111,6 +111,69 @@ def test_edit_protected_file_denied(fake_repo, never):
     assert "DENIED" in out
 
 
+class _Confirm:
+    """Records what it was shown, answers with a fixed verdict."""
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = []
+
+    def __call__(self, prompt, detail="", viewable=""):
+        self.calls.append({"prompt": prompt, "detail": detail, "viewable": viewable})
+        return self.answer
+
+
+def _scoreboard_cfg(cfg, passing: bool):
+    cfg.set("self_build_run_tests", True)
+    # coerce=False: keep the shell command a string ("true"/"false" would
+    # otherwise be coerced to a bool by Config).
+    cfg.set("self_build_test_cmd", "true" if passing else "false", coerce=False)
+    return cfg
+
+
+def test_scoreboard_runs_tests_and_shows_verdict(fake_repo, cfg):
+    confirm = _Confirm(True)
+    ctx = ToolContext(project=None, cfg=_scoreboard_cfg(cfg, passing=True), confirm=confirm)
+    msg = self_build.edit_hermes_source.fn(
+        {"path": "hermes/tools/widget.py", "old": "VALUE = 1", "new": "VALUE = 7"}, ctx
+    )
+    # the operator saw a PASS verdict in the confirm detail
+    assert "TESTS: PASS" in confirm.calls[0]["detail"]
+    assert "edited" in msg and "PASS" in msg
+    assert (fake_repo / "hermes" / "tools" / "widget.py").read_text() == "VALUE = 7\n"
+
+
+def test_scoreboard_failure_declined_reverts(fake_repo, cfg):
+    confirm = _Confirm(False)  # operator declines after seeing FAIL
+    ctx = ToolContext(project=None, cfg=_scoreboard_cfg(cfg, passing=False), confirm=confirm)
+    msg = self_build.edit_hermes_source.fn(
+        {"path": "hermes/tools/widget.py", "old": "VALUE = 1", "new": "VALUE = 66"}, ctx
+    )
+    assert "TESTS: FAIL" in confirm.calls[0]["detail"]
+    assert "reverted" in msg
+    # the file is back to its original content — the failing change did not stick
+    assert (fake_repo / "hermes" / "tools" / "widget.py").read_text() == "VALUE = 1\n"
+
+
+def test_scoreboard_new_file_declined_is_removed(fake_repo, cfg):
+    confirm = _Confirm(False)
+    ctx = ToolContext(project=None, cfg=_scoreboard_cfg(cfg, passing=False), confirm=confirm)
+    msg = self_build.write_hermes_source.fn(
+        {"path": "hermes/tools/brandnew.py", "content": "X = 1\n"}, ctx
+    )
+    assert "reverted" in msg
+    # a newly-created file that failed + was declined must not be left behind
+    assert not (fake_repo / "hermes" / "tools" / "brandnew.py").exists()
+
+
+def test_scoreboard_failure_approved_is_kept(fake_repo, cfg):
+    confirm = _Confirm(True)  # operator overrides a failing suite on purpose
+    ctx = ToolContext(project=None, cfg=_scoreboard_cfg(cfg, passing=False), confirm=confirm)
+    self_build.edit_hermes_source.fn(
+        {"path": "hermes/tools/widget.py", "old": "VALUE = 1", "new": "VALUE = 9"}, ctx
+    )
+    assert (fake_repo / "hermes" / "tools" / "widget.py").read_text() == "VALUE = 9\n"
+
+
 def test_registry_gates_on_self_build_enabled(project, cfg, yes):
     registry = build_registry(project, cfg, yes)
     assert "write_hermes_source" not in registry.names()

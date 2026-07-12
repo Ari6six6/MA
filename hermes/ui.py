@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
+from contextlib import contextmanager
 
 
 def _detect() -> bool:
@@ -38,3 +41,30 @@ green = _paint("32")
 yellow = _paint("33")
 magenta = _paint("35")
 cyan = _paint("36")
+
+
+@contextmanager
+def heartbeat(label: str, interval: float = 15.0, printer=print):
+    """Proof-of-life for a blocking call with no output of its own (a model
+    reply the size of the whole context, a remote command reading through
+    large files, ...). Without this, a legitimately slow operation is
+    indistinguishable from a dead one — the operator sees zero characters
+    either way and has to guess whether to keep waiting or Ctrl-C. Prints
+    `label (Ns)` on a timer until the `with` block exits; silent (and
+    zero-cost past thread setup) for anything that finishes inside the first
+    interval, which is the common case."""
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def _beat():
+        while not stop.wait(interval):
+            elapsed = int(time.monotonic() - started)
+            printer(dim(f"  … {label} ({elapsed}s)"))
+
+    t = threading.Thread(target=_beat, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join(timeout=1)

@@ -354,6 +354,29 @@ doesn't get cut off mid-task, set `max_run_seconds` (and, if delegation is on,
 meaning much once turns are cheap and the model is fast; time is what's
 actually metered on the box you're renting.
 
+### The LLM call timeout (a different layer entirely)
+
+`max_run_seconds`/`delegate_max_seconds` above bound a whole RUN across many
+model calls. `llm_timeout` bounds ONE HTTP call — the httpx read/connect/write/
+pool timeout in `OpenAIBackend`. It matters most for the calls that happen
+*outside* the visible turn loop and get no on-screen warning before they start:
+retrospection, the catalog pass, and the almanac reflection pass all make their
+own model calls after `[run NNNN complete]` has already printed. On a slow box
+or with a big prompt (a large retrospection window, a big file sampled for
+catalog enrichment), the old fixed 300s could cut off a completion that was
+genuinely still working, which then gets retried (`RETRY_DELAYS = (1, 3, 8)`,
+4 attempts total) and redone from scratch each time rather than picked back up.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `llm_timeout` | `300` | seconds before one model HTTP call is abandoned and retried |
+
+Raise it (`config set llm_timeout 900`, or higher) if you keep seeing the same
+call time out two or three retries in a row on a legitimately slow box — that
+pattern means the call needed more room, not that the connection is dead. A
+connection that's *actually* dead (a dropped SSH tunnel) fails the same way
+either way, just after a longer wait before the harness gives up on it.
+
 ### Feature 9 — Retrospection (cross-run self-improvement)
 
 The skills nudge reflects on one run while it's still in context. Retrospection
@@ -392,6 +415,162 @@ turns every Nth run. `retrospect` in the REPL shows the recorded metrics;
 procedures, and the metrics tell you (and it) whether runs are actually
 getting smoother.
 
+### Feature 12 — Stuck-loop guard
+
+A small model will sometimes commit to a failing approach, agree in prose to
+try something else when you push back, and then quietly retry the same
+approach anyway a few turns later — the agreement was just words, with
+nothing behind it. This feature makes the correction mechanical instead of
+conversational: it doesn't ask the model to behave, it stops the tool call
+from running.
+
+How it works: the harness fingerprints every `local_shell` / `sandbox_shell` /
+`remote_shell` / `host_shell` / `http_request` call (tool + normalized
+command/content — digits blurred, whitespace collapsed, so a retry that only
+tweaked a number still matches). Once that exact attempt has failed
+`stuck_repeat_threshold` time(s) this run — a real tool error, or a shell
+command that exited non-zero — repeating it comes back `DENIED (stuck guard)`
+*without running it at all*. Enough blocked repeats fire a one-shot nudge
+telling the model to name a genuinely different approach instead of retrying.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `stuck_guard_enabled` | `false` | turn on fingerprinting + the hard block + the header rule |
+| `stuck_repeat_threshold` | `1` | failures of the SAME attempt allowed before repeats are denied |
+| `stuck_escalate_blocks` | `2` | blocked repeats in one run before the forced-pivot nudge fires |
+
+**The live veto.** If you're watching a run (`go attach`) and see it heading
+back to something you already told it to drop, send `go say veto` (or `go say
+veto <anything>` — the word "veto" at the start is what matters). That
+instantly hard-blocks whatever guarded call it last attempted, for the rest of
+the run — no failure count required, no re-explaining yourself. This is the
+direct fix for "I told it to stop and it did the thing anyway": now telling it
+to stop actually stops it.
+
+**Recommended when running a smaller/local model** where this failure mode is
+common. It only ever blocks *repeats* — a genuinely different command is never
+touched — so it costs nothing on runs that don't get stuck.
+
+### Feature 13 — Reflection nudge
+
+The stuck guard catches an *exact* repeated failure. This catches something
+softer and more common: a long chain of tool calls — failing or not, repeated
+or not — with no reasoning turn in between. When a run strings together
+`reflect_nudge_every` (default 4) tool-call turns with essentially no prose,
+one turn is spent forcing a pause: state what you expected, what the last
+tool result actually showed, whether they match, and whether the plan still
+holds. Bounded by `reflect_nudges` (default 3) per run.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `reflect_nudge_enabled` | `true` | turn the streak counter + pause on |
+| `reflect_nudge_every` | `4` | consecutive silent tool-call turns before pausing |
+| `reflect_nudges` | `3` | max forced pauses per run |
+
+On by default. It fires in `debate` mode too, on purpose — `debate` turns off
+`stall`/`phantom` nudges so pure reasoning is a valid turn, which is exactly
+where an unchecked chain of actions would otherwise slip through.
+
+### Feature 14 — The almanac
+
+At the end of every run, alongside the catalog card pass, the librarian looks
+at this run's outcomes ledger — every code-write/execution attempt paired
+with whatever was expected and what the tool actually returned. When one of
+those looks like a real mismatch (an error, a non-zero exit), a bounded pass
+reads what really happened, forms a hypothesis for WHY, may research it with
+`web_search`/`http_request` (GET only — read-only by construction), and banks
+the finding: a topic slug, a one-line claim, and the theory behind it.
+
+Unlike the catalog (one project's workspace) or skills (how-to procedures),
+the almanac is a single GLOBAL store — `~/.hermes/almanac.jsonl` — shared
+across every project. Its index rides in every system prompt the same way the
+skills index does; `load_almanac(topic)` pulls the full writeup, including any
+research, on demand.
+
+The index alone is easy to skim past — it sits after skills/persona in the
+system prompt, competing with RUN SUMMARIES/NOTES/LAST REPLY (the agent's own
+past output, which self-reinforces). So the package also carries a
+**librarian memo**: cards banked or refined since *this project's* own last
+run, full claim + hypothesis, placed right next to `# CURRENT REQUEST` — new,
+unmissable, and gone once delivered (a per-project cursor in `.almanac_seen`
+advances the moment the package is built for a real run, so it isn't repeated
+next time). A fresh project sees the whole backlog once; an established one
+sees only what's new.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `almanac_enabled` | `true` | outcomes ledger + the end-of-run pass + `load_almanac` + the memo |
+| `almanac_max_turns` | `6` | tool-call budget for one pass (research + the write) |
+| `almanac_index_chars` | `1200` | budget for the almanac index in the system prompt |
+| `almanac_memo_chars` | `1500` | budget for the librarian memo (new-since-last-run) in the package |
+
+On by default. It only fires when something actually looks wrong — a clean
+run costs nothing beyond the (already-logged) outcomes ledger. Writing an
+entry is exclusive to this pass, the same split the catalog uses for
+`catalog_note`: the doer doesn't curate its own long-term record mid-task.
+
+### Feature 17 — The librarian's magazine (debate mode)
+
+The almanac above is the librarian working *behind* the agent, and it only wakes
+on a failed outcome. But a `debate` turn is pure prose — no exit code — so a
+strategically dead line looks clean and comes back word-perfect next time. The
+magazine is the other half: the librarian working *ahead* of the agent, and
+watching debate.
+
+Two passes, gated together on `magazine_enabled` and only in `debate` mode:
+
+- **Morning** — before the turn assembles, the librarian reads the strategy, the
+  agent's own recent runs, and the almanac (researching when a fact would change
+  the move) and writes `magazine.md`. It rides ahead of `# CURRENT REQUEST` in
+  place of the new-since memo, to catch a line the agent already tried.
+- **Night** — at end of turn, the librarian banks the line the agent actually
+  argued to the almanac, so the next morning's brief can catch the repeat.
+
+It checks moves against `strategy.md` — the **librarian's** campaign plan, not
+yours. You own the mission; the librarian sets and refines the strategy from the
+almanac and the agent's runs (the `strategy` command shows it, read-only;
+`magazine` shows the current brief). The agent reads it as authoritative. Absent
+by default, so a project with no strategy adds nothing to the package.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `magazine_enabled` | `false` | the morning brief + the night attempt-register, in `debate` mode |
+| `magazine_max_turns` | `8` | tool-call budget for the morning compose (research + the write) |
+| `magazine_register_max_turns` | `4` | tool-call budget for the end-of-turn attempt log |
+| `magazine_chars` | `2500` | budget for the magazine injected ahead of the request |
+
+Off by default and debate-scoped: the morning pass adds an LLM round-trip before
+each turn — the librarian getting ahead of you is the cost, and the point.
+
+### Feature 15 — The narrator voice
+
+The outer voice, the opposite number of the inner voice. `<think>` is private
+reasoning: captured, but never shown or re-injected. `<narrate>` is the
+reverse — the model may, sparingly and at its own discretion (not every
+turn, not after every tool call), wrap a short story-prose aside in
+`<narrate>...</narrate>`. It's cut out of the dense reply and printed
+separately, in its own color, so it never blends into or crowds out the real
+technical answer — and it is never sent back on a later turn, so it can't be
+used to steer the run or to smuggle memory the model should be using
+`write_note`/`finish_run` for instead.
+
+On top of that, the harness itself narrates the village's two hard lifecycle
+events — a citizen's birth, its harvest — unconditionally, in the same voice,
+the moment either happens. That part needs no model cooperation: an operator
+watching a run where the model never once uses `<narrate>` still sees, on
+screen, that a citizen was born and that its watch ended.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `narrator_enabled` | `true` | show/log `<narrate>` asides + the village birth/harvest lines |
+
+Both halves write to `runs/NNNN/narration.jsonl` when they fire, mirroring
+`thinking.jsonl`. On by default: it costs nothing when the model doesn't use
+the tag, and the village lines are one `print` each. Turn off with
+`config narrator_enabled false` — the tag is still always stripped from the
+visible reply either way, so disabling it only silences the display, not the
+text ever leaking through raw.
+
 ## Static package budget (measured, 60K box)
 
 Keep an eye on the fixed block — it's sent on every single call:
@@ -424,7 +603,12 @@ delegate_enabled       true     # offload big sub-tasks to a clean child
 prefix_cache_order     true     # cheaper calls if the server caches prefixes
 verify_before_done     true     # don't report done without running it
 retrospect_enabled     true     # cross-run self-review every 5 runs
+stuck_guard_enabled    true     # mechanically block repeating a failed approach; recommended on smaller/local models
 # on already, leave them: checkpointing, directive_header_rule
+# also on already, at the operator's explicit request (exceptions to the house
+# default-off rule, alongside checkpointing): reflect_nudge_enabled,
+# almanac_enabled, narrator_enabled — see DECISIONS.md Feature 13/14/15 if you
+# want them off
 # always on, no flag: taint tracking (prompt-injection rail)
 ```
 
@@ -434,6 +618,9 @@ What stays default:
 - `delegate_max_turns 20`, `delegate_max_depth 1`
 - `checkpoint_max 20`
 - `retrospect_every_runs 5`, `retrospect_window 10`, `retrospect_max_turns 4`
+- `stuck_repeat_threshold 1`, `stuck_escalate_blocks 2`
+- `reflect_nudge_every 4`, `reflect_nudges 3`
+- `almanac_max_turns 6`, `almanac_index_chars 1200`
 
 Every one of these is reversible: flip the flag back and the behaviour is exactly
 what it was before. Nothing here changes on-disk formats without silent migration.

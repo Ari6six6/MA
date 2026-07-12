@@ -47,7 +47,7 @@ def test_go_spawns_detached_subprocess_and_watches_it(cfg, capsys, monkeypatch):
     # by the attach tests.
     monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, None))
     monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(cli, "_go_tail", lambda space, entry: tailed.setdefault("space", space))
+    monkeypatch.setattr(cli, "_go_tail", lambda space, entry, **k: tailed.setdefault("space", space))
 
     cli.cmd_go(cfg, "hello there")
 
@@ -67,7 +67,7 @@ def test_go_spawns_detached_subprocess_and_watches_it(cfg, capsys, monkeypatch):
     go_state.clear_entry(cli.DEFAULT_SPACE)
 
     out = capsys.readouterr().out
-    assert "watching it live" in out
+    assert "watching live" in out
 
 
 def test_go_on_busy_space_sends_and_watches_instead_of_spawning(cfg, capsys, monkeypatch):
@@ -83,13 +83,13 @@ def test_go_on_busy_space_sends_and_watches_instead_of_spawning(cfg, capsys, mon
         raise AssertionError("should not spawn a second background run while one is busy")
 
     monkeypatch.setattr(cli.subprocess, "Popen", fail_popen)
-    monkeypatch.setattr(cli, "_go_tail", lambda space, entry: tailed.setdefault("space", space))
+    monkeypatch.setattr(cli, "_go_tail", lambda space, entry, **k: tailed.setdefault("space", space))
 
     cli.cmd_go(cfg, "another one")
 
     assert json.loads(inbox.read_text().splitlines()[0])["text"] == "another one"
     assert tailed["space"] == project.name  # dropped straight into watching it, not a flat refusal
-    assert "sent" in capsys.readouterr().out
+    assert "delivered" in capsys.readouterr().out
     go_state.clear_entry(project.name)
 
 
@@ -126,6 +126,44 @@ def test_go_attach_streams_growing_log_and_detaches_without_killing_it(
     go_state.clear_entry("space")
 
 
+def test_go_tail_follows_from_end_instead_of_replaying_the_whole_log(
+    cfg, tmp_path, capsys, monkeypatch
+):
+    log = tmp_path / "live.log"
+    log.write_text("\n".join(f"old line {i}" for i in range(1, 41)) + "\n")  # 40 lines
+    go_state.start_entry("space", os.getpid(), kind="go",
+                          log=str(log), inbox=str(tmp_path / "x.inbox"))
+    calls = {"n": 0}
+
+    def fake_sleep(_secs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            log.write_text(log.read_text() + "NEW after attach\n")
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", fake_sleep)
+    cli._go_tail("space", go_state.active_entry("space"), replay="tail")
+
+    out = capsys.readouterr().out
+    assert "NEW after attach" in out       # it follows the live tail
+    assert "old line 40" in out            # a little recent context is shown
+    assert "old line 1" not in out         # but the whole log is NOT re-dumped
+    go_state.clear_entry("space")
+
+
+def test_go_tail_replay_all_shows_the_whole_log(cfg, tmp_path, capsys, monkeypatch):
+    log = tmp_path / "live.log"
+    log.write_text("old line 1\nold line 2\n")
+    go_state.start_entry("space", os.getpid(), kind="go",
+                          log=str(log), inbox=str(tmp_path / "x.inbox"))
+    monkeypatch.setattr(cli.time, "sleep",
+                        lambda _s: (_ for _ in ()).throw(KeyboardInterrupt))
+    cli._go_tail("space", go_state.active_entry("space"), replay="all")
+    assert "old line 1" in capsys.readouterr().out  # started it fresh: watch from the top
+    go_state.clear_entry("space")
+
+
 def test_go_say_nothing_running(cfg, capsys):
     cli.cmd_go_say(cfg, "hello")
     assert "nothing running" in capsys.readouterr().out
@@ -138,7 +176,7 @@ def test_go_say_appends_to_inbox_and_watches_it_land(cfg, tmp_path, capsys, monk
     go_state.start_entry(project.name, os.getpid(), kind="go",
                           log=str(tmp_path / "x.log"), inbox=str(inbox))
     tailed = {}
-    monkeypatch.setattr(cli, "_go_tail", lambda space, entry: tailed.setdefault("space", space))
+    monkeypatch.setattr(cli, "_go_tail", lambda space, entry, **k: tailed.setdefault("space", space))
 
     cli.cmd_go_say(cfg, "keep going")
 
@@ -146,8 +184,58 @@ def test_go_say_appends_to_inbox_and_watches_it_land(cfg, tmp_path, capsys, monk
     assert len(lines) == 1
     assert json.loads(lines[0])["text"] == "keep going"
     assert tailed["space"] == project.name  # `say` watches it land, doesn't just fire and forget
-    assert "sent" in capsys.readouterr().out
+    assert "delivered" in capsys.readouterr().out
     go_state.clear_entry(project.name)
+
+
+def test_go_stop_kills_a_detached_worker(cfg, capsys):
+    # A real sleeping subprocess stands in for the worker; `go stop` must end it.
+    proc = cli.subprocess.Popen([cli.sys.executable, "-c", "import time; time.sleep(60)"],
+                            start_new_session=True)
+    space = cli.DEFAULT_SPACE
+    go_state.start_entry(space, proc.pid, kind="go",
+                         log=str(go_state.log_path(space)), inbox=str(go_state.inbox_path(space)))
+
+    cli.cmd_go_stop(cfg, space)  # reaps the pid, so proc.wait() may already be done
+
+    # "stopped" prints only when _stop_worker confirmed the pid is gone.
+    assert "stopped" in capsys.readouterr().out
+    assert not cli.pid_alive(proc.pid)             # it actually died
+    assert go_state.active_entry(space) is None    # state cleaned up
+
+
+def test_go_stop_nothing_running(cfg, capsys):
+    cli.cmd_go_stop(cfg, "")
+    assert "nothing running" in capsys.readouterr().out
+
+
+def test_go_stop_never_kills_a_foreground_session(cfg, capsys):
+    # A `run`/`session` entry is registered under THIS process's pid; stopping
+    # it by pid would kill the REPL, so `go stop` must ignore foreground kinds.
+    space = cli._ensure_space(cfg)
+    go_state.start_entry(space.name, os.getpid(), kind="session")
+
+    cli.cmd_go_stop(cfg, "")
+
+    assert "nothing running to stop" in capsys.readouterr().out
+    assert os.getpid() and go_state.active_entry(space.name) is not None  # untouched
+    go_state.clear_entry(space.name)
+
+
+def test_go_stop_all(cfg, capsys):
+    procs = []
+    for name in ("one", "two"):
+        p = cli.subprocess.Popen([cli.sys.executable, "-c", "import time; time.sleep(60)"],
+                             start_new_session=True)
+        procs.append(p)
+        go_state.start_entry(name, p.pid, kind="go",
+                             log=str(go_state.log_path(name)), inbox=str(go_state.inbox_path(name)))
+
+    cli.cmd_go_stop(cfg, "all")
+
+    for p in procs:
+        assert not cli.pid_alive(p.pid)
+    assert not go_state.list_active()
 
 
 def test_go_status_lists_and_prunes(cfg, capsys):
@@ -182,6 +270,231 @@ def test_run_busy_guard_checks_go_state(cfg, capsys, monkeypatch):
     cli.cmd_run(cfg, "hi")
     assert "busy" in capsys.readouterr().out
     go_state.clear_entry(project.name)
+
+
+def test_session_runs_exchanges_in_the_foreground_then_ends_on_done(
+    cfg, capsys, monkeypatch
+):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.set("stall_nudges", 0)
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+
+    # First message via the loop's own prompt, then `done` to leave.
+    lines = iter(["build me a thing", "done"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(lines))
+
+    cli.cmd_session(cfg, "")  # no arg -> first message comes from input()
+
+    space = cli.DEFAULT_SPACE
+    assert go_state.active_entry(space) is None  # cleaned up in finally
+    project = cli.Project.load(cli._projects_dir(cfg), space)
+    assert (project.runs_dir / "0001").exists()  # one exchange actually ran
+    out = capsys.readouterr().out
+    assert "session ended" in out
+    assert "1 exchange" in out
+
+
+def test_session_uses_the_arg_as_the_first_message(cfg, capsys, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.set("stall_nudges", 0)
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")  # end after the arg
+
+    cli.cmd_session(cfg, "kick it off with this")
+
+    project = cli.Project.load(cli._projects_dir(cfg), cli.DEFAULT_SPACE)
+    assert (project.runs_dir / "0001").exists()
+    assert "1 exchange" in capsys.readouterr().out
+
+
+def test_improve_opens_self_build_for_the_sitting_then_closes_it(
+    cfg, capsys, monkeypatch
+):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    assert cfg.get("self_build_enabled") is False  # closed before
+
+    seen = {}
+
+    def fake_run(project, msg, cfg, backend, **kw):
+        # capture the gate state *during* the sitting
+        seen["during"] = cfg.get("self_build_enabled")
+        seen["framing"] = kw.get("extra_system")
+
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr(cli.agent, "run", fake_run)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")
+
+    cli.cmd_improve(cfg, "what needs improving?")
+
+    assert seen["during"] is True                       # gate open mid-sitting
+    assert "YOU" in seen["framing"]                      # the self-improve contract
+    assert cfg.get("self_build_enabled") is False        # gate closed again after
+    assert go_state.active_entry(cli.DEFAULT_SPACE) is None
+    assert "self-build gate closed" in capsys.readouterr().out
+
+
+def test_improve_restores_prior_self_build_setting(cfg, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.set("self_build_enabled", True)  # already on -> must stay on afterwards
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr(cli.agent, "run", lambda *a, **k: None)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")
+
+    cli.cmd_improve(cfg, "go")
+    assert cfg.get("self_build_enabled") is True
+
+
+def test_improve_busy_guard(cfg, capsys, monkeypatch):
+    project = cli._ensure_space(cfg)
+    go_state.start_entry(project.name, os.getpid(), kind="go")
+    called = {"prepare": False}
+    monkeypatch.setattr(cli, "_prepare_run",
+                        lambda cfg: called.__setitem__("prepare", True) or (None, None, {}, None))
+    cli.cmd_improve(cfg, "go")
+    assert called["prepare"] is False  # bailed on the busy space before preparing
+    assert "busy" in capsys.readouterr().out
+    go_state.clear_entry(project.name)
+
+
+def test_session_busy_guard(cfg, capsys, monkeypatch):
+    project = cli._ensure_space(cfg)
+    go_state.start_entry(project.name, os.getpid(), kind="go")
+    monkeypatch.setattr(cli, "_prepare_run",
+                        lambda cfg: (_ for _ in ()).throw(
+                            AssertionError("must not prepare a run on a busy space")))
+
+    cli.cmd_session(cfg, "hello")
+    assert "busy" in capsys.readouterr().out
+    go_state.clear_entry(project.name)
+
+
+def test_session_ends_when_the_time_budget_is_spent(cfg, capsys, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+
+    # Clock jumps a full budget between "started" and the first remaining-check,
+    # so the loop ends before any exchange — proving the shared cap bounds the
+    # whole session, not just one run.
+    ticks = iter([0.0, float(go_state.GO_MAX_RUN_SECONDS)])
+    monkeypatch.setattr(cli.time, "monotonic", lambda: next(ticks))
+
+    cli.cmd_session(cfg, "do something big")
+    out = capsys.readouterr().out
+    assert "budget is spent" in out
+    assert "0 exchange" in out
+
+
+def test_debate_runs_an_exchange_and_ends_on_done(cfg, capsys, monkeypatch):
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")  # end after the arg
+
+    cli.cmd_debate(cfg, "let's think this through")
+
+    project = cli.Project.load(cli._projects_dir(cfg), cli.DEFAULT_SPACE)
+    assert (project.runs_dir / "0001").exists()  # a turn actually ran with no stall-nudge
+    assert go_state.active_entry(cli.DEFAULT_SPACE) is None  # cleaned up in finally
+    out = capsys.readouterr().out
+    assert "left the table" in out
+    assert "1 exchange" in out
+
+
+def test_debate_turns_off_nudges_and_injects_the_framing(cfg, monkeypatch):
+    """The whole point of the mode: a pure-prose turn is a valid answer, so it
+    hands agent.run stall/phantom nudges = 0 and the debate contract as
+    extra_system — not the work-run defaults."""
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "done")
+
+    seen = {}
+
+    def fake_run(*args, **kwargs):
+        seen.update(kwargs)
+        class _R:  # noqa: D401 - minimal stand-in for RunResult
+            run_id, turns, aborted = 1, 1, False
+        return _R()
+
+    monkeypatch.setattr(cli.agent, "run", fake_run)
+    cli.cmd_debate(cfg, "reason with me")
+
+    assert seen["stall_nudges"] == 0
+    assert seen["phantom_nudges"] == 0
+    assert seen["extra_system"] is cli.DEBATE_FRAMING
+
+
+def test_debate_persona_command_edits_without_leaving_the_table(cfg, monkeypatch):
+    """`persona` mid-sitting opens the editor and loops — it must NOT be sent to
+    the agent as a message."""
+    from hermes.llm import MockBackend
+
+    cfg.set("backend", "mock")
+    cfg.save()
+    monkeypatch.setattr(cli, "_prepare_run", lambda cfg: (None, None, {}, MockBackend()))
+    lines = iter(["persona", "done"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(lines))
+
+    edited = {"count": 0}
+    monkeypatch.setattr(cli, "_edit_file", lambda p: edited.__setitem__("count", edited["count"] + 1))
+    monkeypatch.setattr(cli.agent, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("persona must not be sent to the agent")))
+
+    cli.cmd_debate(cfg, "")
+
+    assert edited["count"] == 1  # the editor opened exactly once
+
+
+def test_debate_busy_guard(cfg, capsys, monkeypatch):
+    project = cli._ensure_space(cfg)
+    go_state.start_entry(project.name, os.getpid(), kind="go")
+    monkeypatch.setattr(cli, "_prepare_run",
+                        lambda cfg: (_ for _ in ()).throw(
+                            AssertionError("must not prepare a run on a busy space")))
+
+    cli.cmd_debate(cfg, "hello")
+    assert "busy" in capsys.readouterr().out
+    go_state.clear_entry(project.name)
+
+
+def test_gpu_serve_prechecks_connectivity_before_gpu_detection(cfg, capsys, monkeypatch):
+    """A dropped SSH link must report as 'box not reachable — re-attach', not as
+    a confusing GPU-detection failure deep in provisioning."""
+    class _Ep:
+        def check_detail(self):
+            return False, "the ssh link dropped mid-handshake — just run it again"
+
+    monkeypatch.setattr(cli, "load_gpu_state", lambda: {"host": "h", "port": 22, "user": "root"})
+    monkeypatch.setattr(cli, "endpoint_from_state", lambda state: _Ep())
+    from hermes.gpu import provision
+    monkeypatch.setattr(provision, "detect_gpus",
+                        lambda ep: (_ for _ in ()).throw(
+                            AssertionError("must not detect GPUs on an unreachable box")))
+
+    cli.cmd_gpu(cfg, "serve")
+    out = capsys.readouterr().out
+    assert "box not reachable" in out
+    assert "re-attach" in out
 
 
 def test_go_end_to_end_subprocess_smoke(cfg):

@@ -70,6 +70,24 @@ class SSHEndpoint:
     user: str = "root"
     remote_workspace: str = "~/hermes-workspace"
     net_isolation: bool = False  # kernel-level (unshare -n) verified on this box
+    ephemeral: bool = False  # a rented/disposable box (GPU) whose SSH host key
+                             # is meaningless: Vast recycles IPs, so a stale
+                             # known_hosts entry would otherwise wedge attach.
+                             # Real `host add` servers leave this False and keep
+                             # strict host-key checking.
+
+    def _host_key_args(self) -> list[str]:
+        # Ephemeral boxes: don't consult or write known_hosts. A recycled Vast
+        # IP whose host key changed must NOT block the connection (and doesn't
+        # pollute known_hosts for the next tenant either). Pinned real servers
+        # keep accept-new so a CHANGED key is still refused, as it should be.
+        if self.ephemeral:
+            return [
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "LogLevel=ERROR",  # silence "Permanently added" noise
+            ]
+        return ["-o", "StrictHostKeyChecking=accept-new"]
 
     def base_args(self) -> list[str]:
         sockets = hermes_home() / "cm-sockets"
@@ -86,7 +104,7 @@ class SSHEndpoint:
             # the ssh process exits instead of wedging the caller forever.
             "-o", "ServerAliveInterval=30",
             "-o", "ServerAliveCountMax=3",
-            "-o", "StrictHostKeyChecking=accept-new",
+            *self._host_key_args(),
             "-o", "ConnectTimeout=15",
             f"{self.user}@{self.host}",
         ]
@@ -144,8 +162,40 @@ class SSHEndpoint:
             return 127, "ssh binary not found — `pkg install openssh` on Termux"
 
     def check(self) -> bool:
-        rc, out, _ = self.run("echo HERMES_OK", timeout=30)
-        return rc == 0 and "HERMES_OK" in out
+        return self.check_detail()[0]
+
+    def check_detail(self) -> tuple[bool, str]:
+        """Like check(), but returns (ok, reason) with a truthful diagnosis
+        instead of a single guess — so `gpu attach` can tell the operator what
+        actually went wrong (host down, auth, host key, unreachable)."""
+        rc, out, err = self.run("echo HERMES_OK", timeout=30)
+        if rc == 0 and "HERMES_OK" in out:
+            return True, "ok"
+        low = ((err or "") + "\n" + (out or "")).lower()
+        if rc == 127:
+            return False, "ssh binary not found — `pkg install openssh` on Termux"
+        if rc == 124:
+            return False, ("no answer in 30s — the box is likely still booting, "
+                           "or the host/port is wrong. Give it a moment and retry")
+        if "remote host identification has changed" in low or "host key verification failed" in low:
+            return False, (f"the box's SSH host key changed (Vast recycled this IP). "
+                           f"Clear the stale entry with "
+                           f"`ssh-keygen -R '[{self.host}]:{self.port}'` and retry")
+        if "permission denied" in low or "no such identity" in low:
+            return False, ("auth denied — this box isn't accepting your SSH key "
+                           "(is your key registered with Vast.ai?)")
+        if ("reset by peer" in low or "broken pipe" in low
+                or "closed by remote host" in low
+                or "kex_exchange_identification" in low):
+            return False, ("the ssh link dropped mid-handshake (flaky link, or the "
+                           "box is still warming up) — just run it again")
+        if "connection refused" in low:
+            return False, "connection refused — sshd isn't up yet; the box is still booting"
+        if ("connection timed out" in low or "operation timed out" in low
+                or "no route to host" in low or "network is unreachable" in low):
+            return False, "can't reach the box — network path is down or host/port is wrong"
+        tail = [ln for ln in (err or out or "").strip().splitlines() if ln.strip()]
+        return False, (f"ssh exited {rc}: {tail[-1].strip()}" if tail else f"ssh exited {rc}")
 
     def write_file(self, path: str, content: str):
         q = shell_path(path)

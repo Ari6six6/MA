@@ -1,16 +1,26 @@
 """The Hermes REPL — short commands for a phone keyboard.
 
-  go <text>         no project ceremony: runs in a detached background
-                     process (survives closing the phone), hard-capped at
-                     GO_MAX_RUN_SECONDS
+  session [text]    the default way to work: a live session you sit INSIDE
+                     with the agent, sharing one time budget (up to
+                     GO_MAX_RUN_SECONDS). You send a message, it works
+                     narrated in front of you, it can pause to ask YOU
+                     something, then it hands the turn back — `done` ends it.
+                     Not a job you fire off; a room you're both in. (alias: s)
+  go <text>         fire-and-forget instead: a detached background process
+                     (survives closing the phone), hard-capped at
+                     GO_MAX_RUN_SECONDS. Use it when you DON'T want to sit
+                     with it; talk to it with `go say`, watch with `go attach`.
   go attach [space] watch a running `go` live — narration + inner voice —
                      detach any time with Ctrl-C, it keeps running
-  go say [space] <text>   send it a message while it's running
+  go say [space] <text>   send a background `go` a message while it's running
+                     (also how you answer when it asks YOU something —
+                     it can pause mid-run and wait for your reply)
+  go stop [space|all]  killswitch: stop a detached run dead (alias: stop)
   go status         list what's running
-  run <text>        talk to the agent in the foreground, narrated turn by
-                     turn, inside the current project (alias: r)
-  space / project    new/use/list — a space IS a project, same files on disk
-                     (alias: p)
+  run <text>        a single foreground exchange (one prompt, one run), inside
+                     the current space (alias: r)
+  space             new/use/list — a space is one workbench of work: its own
+                     mission, files, and run history (alias: p)
   gpu ...           attach/serve/status/tunnel/up/down (alias: g)
   mission/notes/history/summaries/tools/config/persona/help/quit
 """
@@ -19,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -42,7 +53,7 @@ from hermes.sandbox import capabilities as sandbox_capabilities, local_endpoint
 from hermes.ssh import SSHEndpoint, SSHError, kill_pid, parse_ssh_string, pid_alive
 from hermes.ui import bold, cyan, dim, green, magenta, red, yellow
 
-BANNER = f"{bold(magenta('hermes'))} {dim('v' + __version__)} — type {cyan('help')}"
+BANNER = f"{bold(magenta('hermes'))} {dim('v' + __version__)}"
 
 
 # ---------------------------------------------------------------- helpers
@@ -61,11 +72,10 @@ def _current_project(cfg) -> Project | None:
 
 
 def _ensure_space(cfg) -> Project:
-    """`go`'s no-ceremony entry point: use the current project/space if one is
-    selected, else silently create-and-select the default one. Same on-disk
-    project layout as always (`project`/`space new` still work if you want
-    more than one) — this just means `go` never blocks on "no current
-    project"."""
+    """`go`'s no-ceremony entry point: use the current space if one is selected,
+    else silently create-and-select the default one. `space new` still makes a
+    separate workbench if you want more than one — this just means `go` never
+    blocks on "no space selected"."""
     project = _current_project(cfg)
     if project is not None:
         return project
@@ -222,9 +232,8 @@ def cmd_run(cfg, args: str) -> None:
         return
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project")
-              + dim(" — `project new <name>` or `project use <name>` "
-                    "(or just `go`, which doesn't need one)"))
+        print(yellow("no space yet")
+              + dim(" — just use `go <something>`, which starts one for you"))
         return
     busy = go_state.active_entry(project.name)
     if busy:
@@ -238,9 +247,289 @@ def cmd_run(cfg, args: str) -> None:
     go_state.start_entry(project.name, os.getpid(), kind="run")
     try:
         agent.run(project, args.strip(), cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
-                  on_run_started=lambda run_id, _run_dir: go_state.update_run_id(project.name, run_id))
+                  on_run_started=lambda run_id, _run_dir: go_state.update_run_id(project.name, run_id),
+                  background_housekeeping=True)
     finally:
         go_state.clear_entry(project.name)
+
+
+def cmd_session(cfg, args: str) -> None:
+    """A live session you sit INSIDE with the agent — not a job you fire off.
+
+    One shared time budget (the same 42-minute ceiling as `go`, a max and not a
+    target: `session hey` is over in seconds). You drive: type your first
+    request, watch it work narrated in the foreground, answer when it asks you
+    something, and send the next message when it hands the turn back. `done` /
+    `exit` (or Ctrl-C at the prompt) ends the session; a single Ctrl-C while
+    it's working stops just that piece and hands you back the turn. Each
+    exchange is a fresh run that inherits the previous one's summary, so the
+    thread of what you're building carries across the whole session, and the
+    normal y/n gates apply because you're right here."""
+    project = _ensure_space(cfg)
+    busy = go_state.active_entry(project.name)
+    if busy:
+        print(yellow(f"'{project.name}' is busy") + dim(
+            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
+        return
+    prepared = _prepare_run(cfg)
+    if prepared is None:
+        return
+    gpu, sandbox, env, backend = prepared
+
+    total = GO_MAX_RUN_SECONDS
+    started = time.monotonic()
+    mins = total // 60
+
+    def ask_stdin(_question: str) -> str:
+        # The question banner is already printed by the tool; just take the line.
+        try:
+            return input(magenta("  reply> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ""
+
+    go_state.start_entry(project.name, os.getpid(), kind="session")
+    print(dim(f"— session in '{project.name}' — we're in this together, up to "
+              f"{mins} min. Send a message; it works, then hands you back the "
+              f"turn. `done` ends it. —"))
+    first = args.strip()
+    exchanges = 0
+    try:
+        while True:
+            remaining = total - (time.monotonic() - started)
+            if remaining <= 5:
+                print(dim(f"— the {mins}-minute session budget is spent — ending the session —"))
+                break
+            if first:
+                msg, first = first, ""
+            else:
+                try:
+                    msg = input(magenta("you> ")).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+            if msg.lower() in ("done", "exit", "quit", "bye"):
+                break
+            if not msg:
+                continue
+            exchanges += 1
+            agent.run(
+                project, msg, cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
+                max_run_seconds=int(remaining),
+                ask_operator_fn=ask_stdin,
+                on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+                background_housekeeping=True,
+            )
+            left = int(max(0, total - (time.monotonic() - started)) // 60)
+            print(dim(f"— your turn — ~{left} min left in the session (`done` to end) —"))
+    finally:
+        go_state.clear_entry(project.name)
+    # Surface the last turn's background librarian work before handing back the prompt.
+    agent.flush_housekeeping()
+    print(dim(f"— session ended — {exchanges} exchange(s) —"))
+
+
+# The debate contract: injected as this run's system framing (not persona.md,
+# which stays yours to edit). It tells the agent this is a table, not a task —
+# so paired with stall/phantom nudges at 0, a pure-prose turn is a valid answer.
+DEBATE_FRAMING = """\
+You are at the table with the operator — a live, unhurried debate, not a job to
+finish. The person speaking is the operator described in your persona: your
+principal and your partner, working with you, not against you. Reason out loud
+in plain language. Say plainly what you are doing and why, and withhold nothing
+you know that bears on what they're asking. You are NOT required to call a tool
+or produce a deliverable this turn — thinking it through together IS the work.
+Use tools when they genuinely help (read a file they point you to, check a
+fact), then come back to the conversation. Speaking plainly here doesn't retire
+the narrator voice — an occasional <narrate>...</narrate> aside is still yours
+to use if the moment calls for it. When you've said your piece, stop and hand
+the turn back so they can answer."""
+
+
+def cmd_debate(cfg, args: str) -> None:
+    """A table, not a task: sit across from the agent and talk it out.
+
+    Same 42-minute sitting and the same live back-and-forth as `session`, but
+    the "act or finish_run" pressure is off (stall/phantom nudges = 0), so a
+    turn that's pure reasoning is a valid answer instead of something the
+    harness bounces. The agent knows it's talking to the operator (persona) and
+    is told to withhold nothing. `persona`/`persona edit` reshapes who it is
+    without leaving the table; `done`/`exit` (or Ctrl-C at the prompt) ends it."""
+    project = _ensure_space(cfg)
+    busy = go_state.active_entry(project.name)
+    if busy:
+        print(yellow(f"'{project.name}' is busy") + dim(
+            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
+        return
+    prepared = _prepare_run(cfg)
+    if prepared is None:
+        return
+    gpu, sandbox, env, backend = prepared
+
+    total = GO_MAX_RUN_SECONDS
+    started = time.monotonic()
+    mins = total // 60
+
+    def ask_stdin(_question: str) -> str:
+        try:
+            return input(magenta("  reply> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ""
+
+    go_state.start_entry(project.name, os.getpid(), kind="debate")
+    print(dim(f"— at the table in '{project.name}' — up to {mins} min, no rush. "
+              f"Talk it through; `persona` to reshape who you're talking to; "
+              f"`done` to get up. —"))
+    first = args.strip()
+    exchanges = 0
+    try:
+        while True:
+            remaining = total - (time.monotonic() - started)
+            if remaining <= 5:
+                print(dim(f"— the {mins} minutes are up — leaving the table —"))
+                break
+            if first:
+                msg, first = first, ""
+            else:
+                try:
+                    msg = input(magenta("you> ")).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+            low = msg.lower()
+            if low in ("done", "exit", "quit", "bye"):
+                break
+            if low in ("persona", "persona edit"):
+                _edit_file(persona_path())  # reshape who's at the table, mid-sitting
+                continue
+            if not msg:
+                continue
+            exchanges += 1
+            agent.run(
+                project, msg, cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
+                max_run_seconds=int(remaining),
+                ask_operator_fn=ask_stdin,
+                stall_nudges=0, phantom_nudges=0, extra_system=DEBATE_FRAMING,
+                on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+                background_housekeeping=True, mode="debate",
+            )
+            left = int(max(0, total - (time.monotonic() - started)) // 60)
+            print(dim(f"— your turn — ~{left} min left at the table (`done` to end) —"))
+    finally:
+        go_state.clear_entry(project.name)
+    # Surface the last turn's background librarian work before leaving the table.
+    agent.flush_housekeeping()
+    print(dim(f"— left the table — {exchanges} exchange(s) —"))
+
+
+# The self-improvement contract: like the debate contract, but pointed at the
+# machine itself. It tells the agent this sitting is about its OWN code, that the
+# whole record of what it has done is in view, and that edits are real but gated.
+IMPROVE_FRAMING = """\
+You are at the table with the operator, and this sitting is about YOU — the
+Hermes machinery you run on — not an outside task. Everything you have done is in
+view: your mission, your notes, your run summaries, and the WORKSPACE CATALOG of
+what you've produced. You can read your own source with list_hermes_source /
+read_hermes_source, and propose changes with write_hermes_source /
+edit_hermes_source. Every edit pauses for the operator's yes/no with the diff AND
+the test-suite result shown — a change that breaks the tests is visible before
+it's kept, and a decline reverts it cleanly. Some files (the safety gates
+themselves) refuse edits outright; that is by design, not a bug to route around.
+Reason out loud about what actually RECURS in the record — the friction worth
+removing — and prefer small, tested, reversible changes over sweeping ones. The
+narrator voice (<narrate>...</narrate>) is still yours here too, sparingly. When
+you've said your piece, hand the turn back."""
+
+
+def cmd_improve(cfg, args: str) -> None:
+    """Sit at the table to work on Hermes ITSELF: same unhurried sitting as
+    `debate`, but the agent can read and edit its own source, every edit gated by
+    your y/n with the test suite run against it first (the scoreboard). Its whole
+    record — notes, run summaries, the workspace catalog — is in view, so "what
+    do you think needs improvement, looking at what you've done?" is a real
+    question it can answer from the evidence.
+
+    Self-build is turned on for THIS sitting only (not saved), so the gate closes
+    again when you get up. `done`/`exit`/Ctrl-C ends it."""
+    project = _ensure_space(cfg)
+    busy = go_state.active_entry(project.name)
+    if busy:
+        print(yellow(f"'{project.name}' is busy") + dim(
+            f" — a `{busy.get('kind', 'go')}` is already working there (pid {busy['pid']})."))
+        return
+    prepared = _prepare_run(cfg)
+    if prepared is None:
+        return
+    gpu, sandbox, env, backend = prepared
+
+    total = GO_MAX_RUN_SECONDS
+    started = time.monotonic()
+    mins = total // 60
+
+    def ask_stdin(_question: str) -> str:
+        try:
+            return input(magenta("  reply> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return ""
+
+    # Open the self-build gate for this sitting only — remember the prior value
+    # and restore it on the way out, and never save(), so the gate is not left
+    # open on disk after you get up.
+    prior_self_build = cfg.get("self_build_enabled", False)
+    cfg.set("self_build_enabled", True, coerce=False)
+    tests_on = cfg.get("self_build_run_tests", True)
+
+    go_state.start_entry(project.name, os.getpid(), kind="improve")
+    print(dim(f"— working on Hermes itself in '{project.name}' — up to {mins} min. "
+              f"It can read + edit its own source; every edit needs your y/n "
+              f"{'with the test result shown' if tests_on else '(tests OFF)'}. "
+              f"`done` to get up. —"))
+    if not prior_self_build:
+        print(dim("  (self-build is on for this sitting only — it closes when "
+                  "you leave)"))
+    first = args.strip()
+    exchanges = 0
+    try:
+        while True:
+            remaining = total - (time.monotonic() - started)
+            if remaining <= 5:
+                print(dim(f"— the {mins} minutes are up — leaving the table —"))
+                break
+            if first:
+                msg, first = first, ""
+            else:
+                try:
+                    msg = input(magenta("you> ")).strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+            low = msg.lower()
+            if low in ("done", "exit", "quit", "bye"):
+                break
+            if low in ("persona", "persona edit"):
+                _edit_file(persona_path())
+                continue
+            if not msg:
+                continue
+            exchanges += 1
+            agent.run(
+                project, msg, cfg, backend, gpu=gpu, env=env, sandbox=sandbox,
+                max_run_seconds=int(remaining),
+                ask_operator_fn=ask_stdin,
+                stall_nudges=0, phantom_nudges=0, extra_system=IMPROVE_FRAMING,
+                on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
+                background_housekeeping=True,
+            )
+            left = int(max(0, total - (time.monotonic() - started)) // 60)
+            print(dim(f"— your turn — ~{left} min left (`done` to end) —"))
+    finally:
+        cfg.set("self_build_enabled", prior_self_build, coerce=False)  # close the gate
+        go_state.clear_entry(project.name)
+    # Surface the last turn's background librarian work before leaving the table.
+    agent.flush_housekeeping()
+    print(dim(f"— left the table — {exchanges} exchange(s) — self-build gate closed —"))
 
 
 def cmd_go(cfg, args: str) -> None:
@@ -249,7 +538,14 @@ def cmd_go(cfg, args: str) -> None:
     gets woven straight into that conversation, and you watch it land — no
     separate `say` step needed for the common case. Either way you're looking
     at it happen in real time; Ctrl-C is the only way to step back, and it
-    keeps running when you do (survives closing the terminal entirely)."""
+    keeps running when you do (survives closing the terminal entirely).
+
+    The conversation runs both ways: the agent can pause mid-run and ask YOU a
+    question when it hits a genuinely influential fork (via its `ask_operator`
+    tool). It shows up right here in the live view, and you answer the same way
+    you say anything else — Ctrl-C out of the tail if you're watching, then
+    `go <your answer>` (or `go say <space> <answer>`). It picks the reply up and
+    carries on."""
     parts = args.split(maxsplit=1)
     sub, rest = (parts[0], parts[1] if len(parts) > 1 else "") if parts else ("", "")
     if sub == "attach":
@@ -260,6 +556,9 @@ def cmd_go(cfg, args: str) -> None:
         return
     if sub == "status":
         cmd_go_status(cfg, rest)
+        return
+    if sub in ("stop", "kill"):
+        cmd_go_stop(cfg, rest)
         return
 
     text = args.strip()
@@ -279,8 +578,8 @@ def cmd_go(cfg, args: str) -> None:
         return
 
     if not text:
-        print(dim("usage: go <prompt>  |  go attach [space]  |  "
-                   "go say [space] <text>  |  go status"))
+        print(dim("usage: go <prompt>  |  go attach [space]  |  go say [space] <text>"
+                   "  |  go stop [space|all]  |  go status"))
         return
     prepared = _prepare_run(cfg)  # fast fail here; the worker rebuilds its own gpu/sandbox/env/backend
     if prepared is None:
@@ -304,9 +603,9 @@ def cmd_go(cfg, args: str) -> None:
             return
 
     go_state.start_entry(project.name, proc.pid, kind="go", log=str(log_p), inbox=str(inbox_p))
-    print(dim(f"— '{project.name}' (pid {proc.pid}, hard cap {GO_MAX_RUN_SECONDS // 60} min) "
-               "— watching it live, Ctrl-C to leave it running in the background —"))
-    _go_tail(project.name, go_state.active_entry(project.name))
+    print(dim(f"— '{project.name}' started (up to {GO_MAX_RUN_SECONDS // 60} min) — "
+               "watching live · type `go <message>` to steer it · Ctrl-C leaves it running —"))
+    _go_tail(project.name, go_state.active_entry(project.name), replay="all")
 
 
 def _go_target_space(cfg, name: str) -> str:
@@ -317,14 +616,34 @@ def _go_append_inbox(space: str, entry: dict, text: str) -> None:
     line = json.dumps({"ts": time.strftime("%Y-%m-%d %H:%M"), "text": text.strip()})
     with open(entry["inbox_path"], "a") as f:
         f.write(line + "\n")
-    print(green(f"→ sent to '{space}'") + dim(" — picking it up now:"))
+    # Anchor the message you just sent, clearly attributed, so it doesn't vanish
+    # into the stream — and set the expectation that it's queued, not instant.
+    print()
+    print(bold(green("  you: ")) + text.strip())
+    print(dim("  delivered — it reads this at its next step; watching for the reply…"))
 
 
-def _go_tail(space: str, entry: dict) -> None:
-    """Stream a running space's log live until it finishes or the operator
-    Ctrl-Cs out — the shared engine behind `go`, `go say`, and `go attach`."""
+def _go_tail(space: str, entry: dict, replay: str = "tail") -> None:
+    """Stream a running space's live output until it finishes or you Ctrl-C out
+    — the shared engine behind `go`, `go say`, and `go attach`.
+
+    `replay` controls what you see before the live follow begins:
+      "all"  — the whole log from line one (you just started it; watch it all)
+      "tail" — a little recent context, then only new output (you're checking
+               back in; don't re-dump the entire conversation every time)
+    Following from the current end is the fix for the old behavior, where every
+    `say`/`attach` replayed the whole log from the top."""
     log_p = Path(entry["log_path"])
     pos = 0
+    if replay != "all" and log_p.exists():
+        with log_p.open("r") as f:
+            existing = f.read()
+            pos = f.tell()  # follow from here; don't replay everything above
+        recent = existing.splitlines()[-15:]
+        if any(ln.strip() for ln in recent):
+            print(dim("  -- recent --"))
+            print("\n".join(recent))
+            print(dim("  -- live --"))
     try:
         while True:
             entry = go_state.active_entry(space)
@@ -377,6 +696,91 @@ def cmd_go_say(cfg, args: str) -> None:
     _go_tail(space, entry)
 
 
+def _stop_worker(pid: int) -> bool:
+    """Kill a detached `go` worker and everything it spawned. The worker leads
+    its own session/process group (start_new_session=True), so signalling the
+    group takes the agent AND any sandbox/ssh children with it. SIGTERM first
+    for a clean exit; if it's wedged (mid tool call, mid model round-trip) and
+    won't die in ~1.5s, SIGKILL — a killswitch that doesn't guarantee death
+    isn't a killswitch. Returns True once the pid is gone."""
+    def _sig(s):
+        try:
+            os.killpg(pid, s)  # pid == pgid for a session leader
+        except (ProcessLookupError, PermissionError):
+            pass
+        except OSError:
+            try:
+                os.kill(pid, s)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    def _gone():
+        # Reap it if it's our child — otherwise a killed worker lingers as a
+        # zombie and os.kill(pid, 0) still reports it "alive", so we could never
+        # confirm the kill. Not our child (orphaned by an earlier REPL)? init
+        # reaps it; ECHILD just means nothing to reap here.
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+        return not pid_alive(pid)
+
+    if not pid:
+        return True
+    _sig(signal.SIGTERM)
+    for _ in range(15):
+        if _gone():
+            return True
+        time.sleep(0.1)
+    _sig(signal.SIGKILL)
+    for _ in range(10):
+        if _gone():
+            return True
+        time.sleep(0.1)
+    return _gone()
+
+
+def cmd_go_stop(cfg, args: str) -> None:
+    """The killswitch. Stop a detached `go` run dead. `go stop` takes down the
+    one that's running (or the current space's); `go stop <space>` names one;
+    `go stop all` takes down everything. Foreground `run`/`session` aren't
+    touched here — those you stop with Ctrl-C, since killing them by pid would
+    kill this REPL."""
+    workers = {s: e for s, e in go_state.list_active().items() if e.get("kind") == "go"}
+    if not workers:
+        print(dim("(nothing running to stop)"))
+        return
+    target = args.strip()
+    if target == "all":
+        spaces = list(workers)
+    elif target:
+        if target not in workers:
+            print(yellow(f"nothing running in '{target}'"))
+            return
+        spaces = [target]
+    else:
+        current = cfg.get("current_project") or DEFAULT_SPACE
+        if current in workers:
+            spaces = [current]
+        elif len(workers) == 1:
+            spaces = list(workers)
+        else:
+            print(yellow("several running — name one or `go stop all`:")
+                  + dim(" " + ", ".join(sorted(workers))))
+            return
+    for space in spaces:
+        pid = workers[space].get("pid", 0)
+        ok = _stop_worker(pid)
+        go_state.clear_entry(space)
+        go_state.inbox_path(space).unlink(missing_ok=True)
+        go_state.prompt_tmp_path(space).unlink(missing_ok=True)
+        if ok:
+            print(red(f"stopped '{space}'") + dim(f" (pid {pid})"))
+        else:
+            print(red(f"could not confirm '{space}' (pid {pid}) died")
+                  + dim(" — check `go status`"))
+
+
 def cmd_go_status(cfg, args: str) -> None:
     active = go_state.list_active()
     if not active:
@@ -397,7 +801,10 @@ def cmd_go_status(cfg, args: str) -> None:
               f"{run_label:<9}{elapsed_label:<8}{dim(pid_label)}")
 
 
-def cmd_project(cfg, args: str) -> None:
+def cmd_space(cfg, args: str) -> None:
+    """A space is one workbench of your work — its own mission, files, and run
+    history. You get one automatically; you only need this to keep two unrelated
+    efforts apart. `space` lists them, `space new <name>` / `space use <name>`."""
     parts = args.split()
     sub = parts[0] if parts else "list"
     pdir = _projects_dir(cfg)
@@ -409,7 +816,7 @@ def cmd_project(cfg, args: str) -> None:
             return
         cfg.set("current_project", parts[1], coerce=False)
         cfg.save()
-        print(green(f"project '{parts[1]}' created and selected.") + dim(" Edit its mission: `mission edit`"))
+        print(green(f"space '{parts[1]}' created and switched to.") + dim(" Set its brief: `mission edit`"))
     elif sub == "use" and len(parts) > 1:
         try:
             Project.load(pdir, parts[1])
@@ -423,7 +830,7 @@ def cmd_project(cfg, args: str) -> None:
         current = cfg.get("current_project")
         names = Project.list_names(pdir)
         if not names:
-            print(dim("(no projects yet — `project new <name>`)"))
+            print(dim("(no spaces yet — `go <something>` starts one)"))
         for n in names:
             print(green("* ") + bold(n) if n == current else "  " + n)
 
@@ -464,10 +871,11 @@ def cmd_gpu(cfg, args: str) -> None:
                 inst = instances[0]
             user, host, port = "root", inst["ssh_host"], int(inst["ssh_port"])
             instance_id = inst["id"]
-        ep = SSHEndpoint(host=host, port=port, user=user)
+        ep = SSHEndpoint(host=host, port=port, user=user, ephemeral=True)
         print(dim(f"checking ssh {user}@{host}:{port} ..."))
-        if not ep.check():
-            print(red("ssh check failed — is your key registered with Vast.ai?"))
+        ok, why = ep.check_detail()
+        if not ok:
+            print(red("ssh check failed") + dim(f" — {why}"))
             return
         ep.run(f"mkdir -p {ep.remote_workspace}")
         isolated = probe_net_isolation(ep)
@@ -492,6 +900,15 @@ def cmd_gpu(cfg, args: str) -> None:
         ep = endpoint_from_state(state)
         if ep is None:
             print(yellow("not attached — `gpu attach` first"))
+            return
+        # Verify the box is actually reachable BEFORE diving into GPU detection —
+        # otherwise a dropped/reset SSH link surfaces as a confusing "cannot
+        # serve: <gpu detection>" error that looks like a serve/model bug when
+        # the real fix is just to re-attach.
+        ok, why = ep.check_detail()
+        if not ok:
+            print(red("box not reachable") + dim(f" — {why}"))
+            print(dim("re-attach with `gpu attach` (or retry if it was a transient drop), then `gpu serve`"))
             return
         if "net_isolation" not in state:  # attached with an older version
             state["net_isolation"] = probe_net_isolation(ep)
@@ -588,11 +1005,11 @@ def cmd_gpu(cfg, args: str) -> None:
             return
         # SSH host/port can change across a stop/start — always re-read them.
         user, host, port = "root", inst["ssh_host"], int(inst["ssh_port"])
-        ep = SSHEndpoint(host=host, port=port, user=user)
+        ep = SSHEndpoint(host=host, port=port, user=user, ephemeral=True)
         print(dim(f"checking ssh {user}@{host}:{port} ..."))
-        if not ep.check():
-            print(red("ssh check failed after resume")
-                  + dim(" — the box may still be booting; try `gpu up` again shortly"))
+        ok, why = ep.check_detail()
+        if not ok:
+            print(red("ssh check failed after resume") + dim(f" — {why}"))
             return
         ep.run(f"mkdir -p {ep.remote_workspace}")
         isolated = probe_net_isolation(ep)
@@ -723,7 +1140,7 @@ def cmd_directives(cfg, args: str) -> None:
     """
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     sub = args.strip()
     if sub == "edit":
@@ -758,7 +1175,7 @@ def cmd_retrospect(cfg, args: str) -> None:
     """
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     if args.strip() == "now":
         if cfg.get("backend") != "mock" and not _probe_vllm(cfg):
@@ -798,6 +1215,54 @@ def _common_prefix_len(a: str, b: str) -> int:
     return i
 
 
+def cmd_catalog(cfg, args: str) -> None:
+    """The librarian's cards for this space's workspace.
+      catalog          show the current card per artifact (what each file is for)
+      catalog now      force a catalog pass immediately (needs the endpoint for
+                       purpose/tags; the deterministic core runs regardless)
+      catalog log      show the full append-only card history (supersessions too)
+    """
+    from hermes import catalog as catalog_mod
+    project = _current_project(cfg)
+    if project is None:
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
+        return
+    sub = args.strip()
+    if sub == "now":
+        from hermes.models import resolve
+        backend = None
+        if cfg.get("backend") == "mock" or _probe_vllm(cfg):
+            spec = resolve(cfg)
+            think_re = agent._think_re(spec.think_tags)
+            backend = make_backend(cfg)
+        else:
+            think_re = None
+            print(dim("endpoint down — running the deterministic core only "
+                      "(no purpose/tags)."))
+        run_id = project.next_run_id() - 1  # attribute to the most recent run
+        n = catalog_mod.index(project, backend, cfg, max(run_id, 0), think_re=think_re)
+        print(green(f"catalogued {n} artifact(s).") if n else
+              dim("nothing new to catalogue."))
+        return
+    if sub == "log":
+        entries = catalog_mod.read_entries(project)
+        if not entries:
+            print(dim("(no catalog yet — it fills as the agent writes files)"))
+        for e in entries:
+            sup = f" supersedes {e['supersedes']}" if e.get("supersedes") else ""
+            stamp = dim(f"{e.get('ts', '')} r{e.get('run', '?')}")
+            kind = e.get("kind", "file")
+            path = e.get("path", "?")
+            print(f"{stamp} [{kind}] {path}{dim(sup)}")
+        return
+    view = catalog_mod.digest(project, cfg.get("catalog_digest_chars", 2000))
+    if not view:
+        print(dim("(no catalog yet — it fills as the agent writes files; "
+                  "`catalog now` to build it)"))
+        return
+    print(view)
+
+
 def cmd_debug(cfg, args: str) -> None:
     """Diagnostics. `debug prefix` assembles two consecutive packages (with a
     changed runtime status between them) and reports the shared byte prefix — so
@@ -805,7 +1270,7 @@ def cmd_debug(cfg, args: str) -> None:
     from hermes import package
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     sub = (args.split() or ["prefix"])[0]
     if sub != "prefix":
@@ -847,7 +1312,7 @@ def cmd_skills(cfg, args: str) -> None:
     from hermes import skills as skills_mod
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     parts = args.split(maxsplit=1)
     sub = parts[0] if parts else "list"
@@ -882,7 +1347,7 @@ def cmd_checkpoint(cfg, args: str) -> None:
     from hermes import checkpoint
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     parts = args.split(maxsplit=1)
     sub = parts[0] if parts else "list"
@@ -893,7 +1358,7 @@ def cmd_checkpoint(cfg, args: str) -> None:
             print(red(f"no such checkpoint: {cid}") + dim(" — `checkpoint` to list"))
             return
         from hermes.confirm import confirm
-        if not confirm(f"revert project '{project.name}' to checkpoint {cid}?",
+        if not confirm(f"revert space '{project.name}' to checkpoint {cid}?",
                        detail=dim("  overwrites workspace/tools/skills/notes/etc. "
                                   "with the snapshot")):
             print(dim("cancelled."))
@@ -976,13 +1441,25 @@ def cmd_allow(cfg, args: str) -> None:
 def cmd_info(cfg, what: str, args: str) -> None:
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     if what == "mission":
         if args.strip() == "edit":
             _edit_file(project.mission_path)
         else:
             print(project.read_mission())
+    elif what == "strategy":
+        # The campaign plan is the LIBRARIAN's, not the operator's — you own the
+        # mission, it owns the line that serves it. View-only here: it's set and
+        # refined by the librarian's morning pass from the almanac and the runs.
+        print(project.read_strategy()
+              or dim("(no strategy yet — the librarian sets it on the first "
+                     "debate turn with magazine_enabled on)"))
+    elif what == "magazine":
+        from hermes import magazine as magazine_mod
+        print(magazine_mod.read_magazine(project)
+              or dim("(no magazine yet — the librarian writes it at the start of "
+                     "a debate turn when `magazine_enabled` is on)"))
     elif what == "notes":
         print(project.read_notes() or dim("(no notes)"))
     elif what == "history":
@@ -1001,7 +1478,7 @@ def cmd_tools(cfg) -> None:
     from hermes.tools import build_registry
     project = _current_project(cfg)
     if project is None:
-        print(yellow("no current project"))
+        print(yellow("no space yet") + dim(" — `go <something>` starts one"))
         return
     registry = build_registry(project, cfg, confirm)
     for name in registry.names():
@@ -1012,28 +1489,51 @@ def cmd_tools(cfg) -> None:
         print(f"  {cyan(name)}: {t.description[:90]}")
 
 
+# The whole program in a handful of short lines that don't wrap on a phone.
+# `help more` opens everything else — still there, just out of the way.
 HELP = f"""\
-{cyan('go')} <text>             background run, no project ceremony, capped at {GO_MAX_RUN_SECONDS // 60} min
-{cyan('go')} attach [space]     watch it live (narration + inner voice) — Ctrl-C to detach
-{cyan('go')} say [space] <text>  send it a message while it's running
+{bold('the essentials')}
+{cyan('debate')}         sit at the table and talk it out — a {GO_MAX_RUN_SECONDS // 60}-min conversation, no rush {dim('(alias: d)')}
+{cyan('go')} <text>      start a {GO_MAX_RUN_SECONDS // 60}-min session; watch it, steer it, it can ask you back
+{cyan('go')}             drop back into what's running
+{cyan('stop')}           {bold('killswitch')} — stop it dead now ({cyan('stop all')} for everything)
+{cyan('go status')}      what's running now
+{cyan('gpu attach')}     get a GPU
+{cyan('gpu serve')}      load the model onto it
+{cyan('mission')}        the brief it always reads {dim('(mission edit to change)')}
+{cyan('help more')}      everything else
+{cyan('quit')}           leave
+"""
+
+# Everything the essentials view leaves out. Power is all here; it just isn't in
+# your face every time you open the program.
+HELP_MORE = f"""\
+{bold('Starting work')}
+{cyan('go')} <text>             background {GO_MAX_RUN_SECONDS // 60}-min session you watch + steer live (survives closing the phone)
+{cyan('go')} say [space] <text>  steer a background session (also how you answer when it asks you something)
+{cyan('go')} attach [space]     drop into a running session's live view — Ctrl-C to step out
+{cyan('go')} stop [space|all]   {bold('killswitch')} — stop a detached run dead {dim('(alias: stop)')}
 {cyan('go')} status             list what's running
-{cyan('run')} <text>            foreground, narrated turn by turn, needs a selected project {dim('(alias: r)')}
-{cyan('space')} / {cyan('project')} new|use|list  a space IS a project, same files on disk {dim('(alias: p)')}
-{cyan('mission')} [edit]        show/edit the project mission
-{cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
-{cyan('directives')} [edit|reconcile]  standing instructions distilled from history
-{cyan('skills')} [show|edit <name>]  the agent's reusable how-to notes
-{cyan('checkpoint')} [restore <id>]  project snapshots before file-mutating turns
-{cyan('retrospect')} [now]      per-run metrics + the cross-run self-review pass
-{cyan('tools')}                 list the agent's tools
+{cyan('debate')} [text]         sit at the table and reason it out — no "act or finish" pressure, pure talk {dim('(alias: d)')}
+{cyan('improve')} [text]        sit at the table to work on Hermes ITSELF — it reads/edits its own source, every edit gated + test-run {dim('(alias: i)')}
+{cyan('session')} [text]        sit WITH it in the foreground the whole time instead {dim('(alias: s)')}
+{cyan('run')} <text>            one foreground exchange, then back to the prompt {dim('(alias: r)')}
+
+{bold('Where your work lives')}
+{cyan('space')} new|use|list    a space is one workbench of work (its own mission, files, run history) {dim('(alias: p)')}
+{cyan('mission')} [edit]        the standing brief   ·   {cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
+{cyan('strategy')}             the librarian's campaign plan (it sets it; you read it)   ·   {cyan('magazine')}  today's brief
+{cyan('catalog')} [now|log]     the librarian's index of your workspace — what each file is for
+{cyan('checkpoint')} [restore <id>]  snapshots taken before the agent changes files
+
+{bold('The GPU')}
 {cyan('gpu')} attach [sshstr] | serve | status | tunnel | down   {dim('(alias: g)')}
-{cyan('host')} add <name> <sshstr> [note] | list | rm <name>     your real servers
-{cyan('sandbox')} status | provision                            the local box where the exec container runs
-{cyan('persona')} edit          edit the persona appended to the system prompt
-{cyan('debug')} prefix          measure the prefix-cache-shared bytes across two packages
-{cyan('config')} [key [value]]  view/set configuration
-{cyan('allow')} [list] | add <domain> [methods] | rm <domain>   persistent http_request auto-approve
-{cyan('quit')}                  exit
+
+{bold('Deeper')}
+{cyan('directives')} [edit|reconcile]  ·  {cyan('skills')} [show|edit <name>]  ·  {cyan('retrospect')} [now]  ·  {cyan('tools')}
+{cyan('host')} add <name> <sshstr> [note] | list | rm    your real servers
+{cyan('sandbox')} status | provision   ·   {cyan('persona')} edit   ·   {cyan('debug')} prefix
+{cyan('config')} [key [value]]   ·   {cyan('allow')} [list] | add <domain> [methods] | rm <domain>
 """
 
 
@@ -1043,17 +1543,26 @@ def dispatch(cfg, line: str) -> bool:
     if not line:
         return True
     cmd, _, rest = line.partition(" ")
-    cmd = {"r": "run", "p": "project", "g": "gpu", "exit": "quit", "q": "quit"}.get(cmd, cmd)
+    cmd = {"r": "run", "p": "project", "g": "gpu", "s": "session",
+           "d": "debate", "i": "improve", "exit": "quit", "q": "quit"}.get(cmd, cmd)
     if cmd == "quit":
         return False
     elif cmd == "help":
-        print(HELP)
+        print(HELP_MORE if rest.strip() in ("more", "all", "full") else HELP)
+    elif cmd == "debate":
+        cmd_debate(cfg, rest)
+    elif cmd == "improve":
+        cmd_improve(cfg, rest)
+    elif cmd == "session":
+        cmd_session(cfg, rest)
     elif cmd == "go":
         cmd_go(cfg, rest)
+    elif cmd in ("stop", "kill"):  # killswitch, reachable without the `go` prefix
+        cmd_go_stop(cfg, rest)
     elif cmd == "run":
         cmd_run(cfg, rest)
-    elif cmd in ("project", "space"):
-        cmd_project(cfg, rest)
+    elif cmd in ("space", "project"):  # `project` kept as a quiet alias for muscle memory
+        cmd_space(cfg, rest)
     elif cmd == "gpu":
         cmd_gpu(cfg, rest)
     elif cmd == "host":
@@ -1074,7 +1583,9 @@ def dispatch(cfg, line: str) -> bool:
         cmd_checkpoint(cfg, rest)
     elif cmd == "retrospect":
         cmd_retrospect(cfg, rest)
-    elif cmd in ("mission", "notes", "history", "summaries"):
+    elif cmd == "catalog":
+        cmd_catalog(cfg, rest)
+    elif cmd in ("mission", "strategy", "magazine", "notes", "history", "summaries"):
         cmd_info(cfg, cmd, rest)
     elif cmd == "tools":
         cmd_tools(cfg)
@@ -1090,25 +1601,25 @@ def main() -> None:
     cfg.save()  # materialize defaults + persona on first start
     hermes_home().mkdir(parents=True, exist_ok=True)
     print(BANNER)
-    project = cfg.get("current_project") or "-"
-    print(f"project: {cyan(project)} {dim('·')} backend: {cyan(cfg.get('backend'))}")
+    print(dim("sit down: ") + cyan("debate") + dim("   ·   send it off: ")
+          + cyan("go <what you want done>") + dim("   ·   ") + cyan("help"))
 
     session = None
     ansi = None
-    patch_stdout = None
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.formatted_text import ANSI as ansi
         from prompt_toolkit.history import FileHistory
-        from prompt_toolkit.patch_stdout import patch_stdout
         session = PromptSession(history=FileHistory(str(hermes_home() / "repl_history")))
     except Exception:
         pass
 
     def _loop() -> None:
+        # The prompt is always the bare `hermes> ` — no space name. You're here
+        # to talk to the one guy, not to manage projects; which workbench you're
+        # on is a `space` concern, kept out of the face you look at every line.
+        prompt_text = f"{magenta('hermes> ')}"
         while True:
-            proj = cfg.get("current_project") or "-"
-            prompt_text = f"{magenta('hermes')}({cyan(proj)})> "
             try:
                 line = session.prompt(ansi(prompt_text)) if session else input(prompt_text)
             except (EOFError, KeyboardInterrupt):
@@ -1120,16 +1631,12 @@ def main() -> None:
             except Exception as e:  # the REPL must survive anything
                 print(red(f"error: {type(e).__name__}: {e}"))
 
-    # `go` finishes on a background thread and prints its result whenever it
-    # lands — patch_stdout is prompt_toolkit's documented way to let that kind
-    # of background output interleave cleanly above a live prompt line instead
-    # of mangling it. Only relevant when the prompt_toolkit session is in play;
-    # the plain-input() fallback has no live line to protect.
-    if patch_stdout is not None:
-        with patch_stdout():
-            _loop()
-    else:
-        _loop()
+    # No patch_stdout: `go` runs as a detached subprocess and its output is
+    # streamed synchronously by `_go_tail`, so nothing prints into this REPL
+    # from a background thread. prompt_toolkit's StdoutProxy would only get in
+    # the way — it escapes the raw ANSI in our print()s into literal `^[[2m`
+    # gibberish. Printing straight to the terminal renders the colors.
+    _loop()
     print(dim("bye."))
 
 
