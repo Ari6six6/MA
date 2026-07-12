@@ -526,9 +526,11 @@ Two passes, gated together on `magazine_enabled` and only in `debate` mode:
 - **Night** — at end of turn, the librarian banks the line the agent actually
   argued to the almanac, so the next morning's brief can catch the repeat.
 
-It checks moves against `strategy.md` — an operator-owned campaign plan (write it
-with `strategy edit`; `magazine` shows the current brief). Absent by default, so
-a project with no strategy adds nothing to the package.
+It checks moves against `strategy.md` — the **librarian's** campaign plan, not
+yours. You own the mission; the librarian sets and refines the strategy from the
+almanac and the agent's runs (the `strategy` command shows it, read-only;
+`magazine` shows the current brief). The agent reads it as authoritative. Absent
+by default, so a project with no strategy adds nothing to the package.
 
 | Flag | Default | Effect |
 |---|---|---|

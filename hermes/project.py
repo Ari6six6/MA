@@ -19,15 +19,6 @@ DEFAULT_MISSION = """\
 every run — keep it current. Edit freely.)
 """
 
-DEFAULT_STRATEGY = """\
-# Strategy
-
-(The general line this project is pursuing — the plan your day-to-day moves
-should serve, and the one the librarian checks each attempt against. Broader
-than a single request, narrower than the mission. Edit freely; `strategy`
-opens it.)
-"""
-
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 
@@ -58,10 +49,11 @@ class Project:
 
     @property
     def strategy_path(self) -> Path:
-        """The campaign plan — operator-owned, like mission.md but the current
-        line rather than the standing purpose. Read by the agent and by the
-        librarian's magazine/attempt passes. Not auto-created: absent until the
-        operator writes one (`strategy`), and read as empty until then."""
+        """The campaign plan — the LIBRARIAN's, not the operator's. The operator
+        owns mission.md (the standing purpose); the librarian keeps strategy.md
+        (the current line) and refines it from the almanac and the agent's runs.
+        Read by the agent as authoritative and by the librarian's own passes.
+        Absent until the librarian first writes one; read as empty until then."""
         return self.root / "strategy.md"
 
     @property
@@ -267,6 +259,12 @@ class Project:
 
     def read_strategy(self) -> str:
         return self.strategy_path.read_text() if self.strategy_path.exists() else ""
+
+    def write_strategy(self, text: str) -> None:
+        """The librarian's write surface for the campaign line (used by the
+        write_strategy tool). Full replace — like directives, the strategy is
+        one living document, not an append log."""
+        self.strategy_path.write_text(text.rstrip() + "\n")
 
     def write_directives(self, text: str) -> None:
         self.directives_path.write_text(text.rstrip() + "\n")

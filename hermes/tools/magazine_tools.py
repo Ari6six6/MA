@@ -1,14 +1,38 @@
-"""Magazine tool: the librarian's write surface for the morning brief.
+"""The librarian's morning write surfaces: the strategy and the magazine.
 
 Registered only inside the morning compose pass's own narrow registry
-(hermes/magazine.py) — the same split almanac_note uses. A write that a future
-package hands straight to the agent is the librarian's alone; the doer mid-turn
-never holds it.
+(hermes/magazine.py) — the same split almanac_note uses. Both the campaign line
+and the brief a future package hands straight to the agent are the librarian's
+alone; the doer mid-turn never holds either. The operator owns mission.md; the
+strategy is the librarian's.
 """
 
 from __future__ import annotations
 
 from hermes.tools.base import obj_schema, tool
+
+
+@tool(
+    "write_strategy",
+    "Set or refine the campaign STRATEGY — the durable line this project is "
+    "pursuing, which the agent reads as authoritative and you check its moves "
+    "against. This is yours to keep, not the operator's (they own the mission). "
+    "Full replace, so write the whole strategy in one call. Set it when it's "
+    "absent; refine it when the almanac or the agent's runs show the line has "
+    "genuinely drifted — don't churn it every morning.",
+    obj_schema(
+        {"text": {"type": "string", "description": "the full strategy, markdown"}},
+        ["text"],
+    ),
+)
+def write_strategy(args, ctx):
+    if ctx.project is None:
+        return "ERROR: no project in context."
+    text = str(args.get("text", "")).strip()
+    if not text:
+        return "ERROR: text is required — the strategy can't be empty."
+    ctx.project.write_strategy(text)
+    return "strategy set — the agent reads it as the line to serve."
 
 
 @tool(
@@ -34,4 +58,4 @@ def write_magazine(args, ctx):
     return "magazine written — it will ride ahead of the agent's request."
 
 
-TOOLS = [write_magazine]
+TOOLS = [write_strategy, write_magazine]

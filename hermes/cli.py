@@ -1449,17 +1449,12 @@ def cmd_info(cfg, what: str, args: str) -> None:
         else:
             print(project.read_mission())
     elif what == "strategy":
-        # The campaign plan — operator-owned, seeded on first edit so the file
-        # opens with the template rather than blank. The librarian's magazine
-        # and attempt passes check the agent's moves against whatever's here.
-        if args.strip() == "edit":
-            from hermes.project import DEFAULT_STRATEGY
-            if not project.strategy_path.exists():
-                project.strategy_path.write_text(DEFAULT_STRATEGY)
-            _edit_file(project.strategy_path)
-        else:
-            print(project.read_strategy()
-                  or dim("(no strategy set — `strategy edit` to write one)"))
+        # The campaign plan is the LIBRARIAN's, not the operator's — you own the
+        # mission, it owns the line that serves it. View-only here: it's set and
+        # refined by the librarian's morning pass from the almanac and the runs.
+        print(project.read_strategy()
+              or dim("(no strategy yet — the librarian sets it on the first "
+                     "debate turn with magazine_enabled on)"))
     elif what == "magazine":
         from hermes import magazine as magazine_mod
         print(magazine_mod.read_magazine(project)
@@ -1527,7 +1522,7 @@ HELP_MORE = f"""\
 {bold('Where your work lives')}
 {cyan('space')} new|use|list    a space is one workbench of work (its own mission, files, run history) {dim('(alias: p)')}
 {cyan('mission')} [edit]        the standing brief   ·   {cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
-{cyan('strategy')} [edit]       the campaign plan the librarian checks each move against   ·   {cyan('magazine')}  today's brief
+{cyan('strategy')}             the librarian's campaign plan (it sets it; you read it)   ·   {cyan('magazine')}  today's brief
 {cyan('catalog')} [now|log]     the librarian's index of your workspace — what each file is for
 {cyan('checkpoint')} [restore <id>]  snapshots taken before the agent changes files
 

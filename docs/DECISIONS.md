@@ -776,16 +776,20 @@ of it at the start of the next — handing over a written brief (a "magazine",
 formerly "the memo") that says what the librarian knows before the agent walks
 into a high-intensity loop. And give it a plan to check moves against.
 
-- **`strategy.md` — a distinct campaign-plan file, not folded into mission or
-  directives.** The operator spoke of the strategy file and the directives file
-  as different things. Mission is the standing purpose; directives are standing
+- **`strategy.md` — a distinct campaign-plan file, and the LIBRARIAN's, not the
+  operator's.** Mission is the standing purpose; directives are standing
   instructions (recency-reconciled); the strategy is the *current line* the
-  day-to-day moves should serve. It's operator-owned (like mission), read by the
-  agent (a `# STRATEGY` section right after `# MISSION`) and by both librarian
-  passes. Deliberately **not** auto-created in `ensure_layout` — absent, and
-  read as empty, until the operator writes one (`strategy edit` seeds the
-  template). That keeps the change zero-blast-radius for every existing project
-  and test: no strategy file, no new section.
+  day-to-day moves should serve. The operator owns the mission and nothing here
+  — the librarian owns the strategy: it sets it (from the mission, the almanac,
+  and the agent's runs) and refines it when the line drifts, via a `write_strategy`
+  tool in the morning pass's own registry. The agent reads it as authoritative (a
+  `# STRATEGY` section right after `# MISSION`); the `strategy` CLI command is
+  view-only. Deliberately **not** auto-created in `ensure_layout` — absent, and
+  read as empty, until the librarian first writes one. That keeps the change
+  zero-blast-radius for every existing project and test: no strategy file, no new
+  section. (The operator's stated intent is to build role structure on top of
+  this — e.g. a dedicated "general" agent who owns the strategy — so ownership
+  lives in a tool + a prompt, not hardwired to the librarian.)
 
 - **Two passes, the two halves of the same character** (`hermes/magazine.py`):
   - *Morning (`compose`)* — synchronous, before `package.assemble`, so the brief

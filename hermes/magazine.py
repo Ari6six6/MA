@@ -145,7 +145,7 @@ def compose(project, backend, cfg, prompt, think_re=None, log=None,
 
     rendered = package.render(package.magazine_prompt(), {
         "strategy": project.read_strategy().strip()
-        or "(no strategy set — strategy.md is empty)",
+        or "(none yet — this is yours to set with write_strategy)",
         "mission": project.read_mission().strip() or "(empty)",
         "directives": project.read_directives().strip() or "(none)",
         "summaries": _summaries_block(project) or "(no past runs yet)",

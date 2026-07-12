@@ -15,12 +15,28 @@ def test_strategy_absent_by_default(project, cfg, home):
 
 
 def test_strategy_rides_in_package_when_set(project, cfg, home):
-    project.strategy_path.write_text("# Strategy\n\nShip the narrow slice first.\n")
+    project.write_strategy("# Strategy\n\nShip the narrow slice first.")
     user = package.assemble(project, "x", {}, cfg)[1]["content"]
     assert "# STRATEGY" in user
     assert "Ship the narrow slice first." in user
     # After the mission, before the request.
     assert user.index("# MISSION") < user.index("# STRATEGY") < user.index("# CURRENT REQUEST")
+
+
+def test_librarian_sets_the_strategy_during_compose(project, cfg, home):
+    # The strategy is the librarian's: an empty one is set from the compose pass,
+    # not authored by the operator.
+    assert project.read_strategy() == ""
+    backend = MockBackend([
+        {"tool": "write_strategy",
+         "args": {"text": "# Strategy\n\nWin by shipping the narrowest useful slice."}},
+        {"tool": "write_magazine",
+         "args": {"text": "BRIEF: set the line — narrow slices, no rewrites."}},
+        {"text": "done"},
+    ])
+    text = magazine.compose(project, backend, cfg, "what's the plan?")
+    assert text is not None
+    assert "narrowest useful slice" in project.read_strategy()
 
 
 # -- the magazine file --------------------------------------------------------
@@ -40,6 +56,7 @@ def test_read_magazine_empty_when_absent(project, home):
 def test_compose_registry_is_narrow():
     names = magazine._compose_registry().names()
     assert "write_magazine" in names
+    assert "write_strategy" in names        # the librarian keeps the strategy
     assert "web_search" in names and "http_request" in names
     assert "load_almanac" in names          # may read a card before citing it
     assert "almanac_note" not in names      # the morning brief never banks
