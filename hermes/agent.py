@@ -279,11 +279,15 @@ atexit.register(flush_housekeeping)
 
 
 def _librarian_passes(project, hk_backend, cfg, run_id, code_outcomes,
-                      think_re, log, backend_dead) -> list[str]:
-    """Run the three heavy end-of-run passes and return announcement lines for
-    the caller to print (from the main thread). Prints nothing itself and never
+                      think_re, log, backend_dead, mode=None, prompt="",
+                      final_text="") -> list[str]:
+    """Run the heavy end-of-run passes and return announcement lines for the
+    caller to print (from the main thread). Prints nothing itself and never
     raises — safe to run in a background thread. Mirrors the synchronous order
-    the passes used to run in."""
+    the passes used to run in. In debate mode (and only when magazine_enabled),
+    a final pass logs the line the agent argued this turn to the almanac — the
+    night half of the magazine, since a prose debate turn never trips the
+    outcome-failure gate the almanac's own pass keys off."""
     anns: list[str] = []
     if cfg.get("retrospect_enabled", False) and not backend_dead:
         from hermes import retrospect as retrospect_mod
@@ -316,6 +320,17 @@ def _librarian_passes(project, hk_backend, cfg, run_id, code_outcomes,
                 anns.append(magenta("  (librarian — banked a hypothesis to the almanac)"))
         except Exception:
             pass
+    if (cfg.get("magazine_enabled", False) and mode == "debate"
+            and not backend_dead and final_text):
+        from hermes import magazine as magazine_mod
+        try:
+            if magazine_mod.register_attempt(
+                project, hk_backend, cfg, prompt, final_text,
+                think_re=think_re, log=log, narrate=_SILENT,
+            ):
+                anns.append(magenta("  (librarian — logged this turn's line to the almanac)"))
+        except Exception:
+            pass
     return anns
 
 
@@ -323,7 +338,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         sandbox=None, quiet=False, max_run_seconds=None, inbox_path=None,
         on_run_started=None, show_thinking=False, ask_operator_fn=None,
         stall_nudges=None, phantom_nudges=None, extra_system=None,
-        background_housekeeping=False):
+        background_housekeeping=False, mode=None):
     """Execute one agent run. `env` carries gpu_status / remote_workspace /
     context_window for the package; `gpu` is an SSHEndpoint or None; `sandbox` is
     the VPS sandbox-host SSHEndpoint (the air-gapped exec container) or None.
@@ -361,7 +376,11 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
     passes (retrospection, catalog, almanac) in a daemon thread so an interactive
     caller gets the prompt back immediately; the next run joins them before it
     assembles, and process exit joins them too. Default False keeps them inline
-    and synchronous — every non-interactive caller and every test is unchanged."""
+    and synchronous — every non-interactive caller and every test is unchanged.
+    `mode`, when "debate", turns on the librarian's magazine: a synchronous
+    morning pass composes the forward brief before this turn assembles, and an
+    end-of-turn pass logs the line the agent argued to the almanac. Both are
+    additionally gated on `magazine_enabled`; None (the default) leaves them off."""
     out = (lambda *a, **k: None) if quiet else print
     if confirm_fn is None:
         from hermes.confirm import confirm as confirm_fn
@@ -456,7 +475,27 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
             out(magenta("  (reconciled standing instructions → directives.md)"))
             log({"role": "directives", "content": project.read_directives()})
 
-    messages = package.assemble(project, prompt, env, cfg)
+    # The librarian's magazine (the morning brief): in debate mode, before we
+    # assemble, the librarian works AHEAD of the agent — reads the strategy, the
+    # agent's own recent runs, and the almanac, researches when it matters, and
+    # writes magazine.md. It rides in the package below, ahead of the request,
+    # to catch a line the agent already tried. Synchronous on purpose: the brief
+    # has to exist before the package is built. compose() handles a dead backend
+    # itself (returns None); off unless magazine_enabled and mode == "debate".
+    magazine_text = None
+    if cfg.get("magazine_enabled", False) and mode == "debate":
+        from hermes import magazine as magazine_mod
+        try:
+            magazine_text = magazine_mod.compose(
+                project, hk_backend, cfg, prompt,
+                think_re=think_re, log=log, narrate=_SILENT,
+            )
+            if magazine_text:
+                out(magenta("  (librarian — the morning magazine is on your desk)"))
+        except Exception:
+            magazine_text = None
+
+    messages = package.assemble(project, prompt, env, cfg, magazine_text=magazine_text)
     # The librarian memo (feature 14 follow-up) is "new since last run" — advance
     # the bookmark the instant it's handed to a real run, so it isn't repeated
     # next time. package.assemble stays a pure read; this is the one place that
@@ -942,6 +981,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
             _PENDING.announcements = _librarian_passes(
                 project, quiet_backend, cfg, run_id, code_outcomes,
                 think_re, log, backend_dead,
+                mode=mode, prompt=prompt, final_text=final_text,
             )
         t = threading.Thread(target=_worker, daemon=True,
                              name=f"hermes-housekeeping-{run_id:04d}")
@@ -951,6 +991,7 @@ def run(project, prompt, cfg, backend, gpu=None, env=None, confirm_fn=None,
         for line in _librarian_passes(
             project, hk_backend, cfg, run_id, code_outcomes,
             think_re, log, backend_dead,
+            mode=mode, prompt=prompt, final_text=final_text,
         ):
             out(line)
     return RunResult(run_id, summary, final_text, turns, aborted)

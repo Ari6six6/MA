@@ -157,13 +157,17 @@ def build_system_prompt(project: Project, env: dict, cfg: Config | None = None) 
     return system
 
 
-def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict]:
+def assemble(project: Project, prompt: str, env: dict, cfg: Config,
+             magazine_text: str | None = None) -> list[dict]:
     """Build the two-message package. `env` carries gpu_status,
-    remote_workspace and context_window (0 if unknown)."""
+    remote_workspace and context_window (0 if unknown). `magazine_text`, when
+    given, is the librarian's morning brief (composed by the caller in debate
+    mode) — it rides in the pre-request slot in place of the new-since memo."""
     total_chars = package_budget_chars(cfg, env.get("context_window") or 0)
     budget = {k: int(total_chars * share) for k, share in SECTION_SHARES.items()}
 
     mission = truncate_keep_head(project.read_mission().strip(), budget["mission"])
+    strategy = truncate_keep_head(project.read_strategy().strip(), budget["mission"])
 
     # Directive reconciliation (feature 1): when on, the distilled directives.md
     # is the authoritative standing-instruction channel and only the last K raw
@@ -223,6 +227,15 @@ def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict
         history_header = "# PROMPT HISTORY (operator, oldest first)"
 
     sections = ["# MISSION\n" + (mission or "(empty)")]
+    # The campaign plan, when the operator has set one. Placed right after the
+    # mission (the standing purpose) and before directives: the strategy is the
+    # current line the day-to-day moves should serve. Absent by default, so a
+    # project with no strategy.md adds no section at all.
+    if strategy:
+        sections.append(
+            "# STRATEGY (the general line this project is pursuing — your "
+            "day-to-day moves should serve this)\n" + strategy
+        )
     if directives_on:
         sections.append(
             "# DIRECTIVES (authoritative standing instructions — obey these; "
@@ -248,7 +261,22 @@ def assemble(project: Project, prompt: str, env: dict, cfg: Config) -> list[dict
     # in the system prompt is easy to never check. This is neither: it's new,
     # it's unmissable, and it's gone once read (the cursor advances the
     # moment this package is built for a real run — see agent.run).
-    if cfg.get("almanac_enabled", False):
+    if magazine_text:
+        # The librarian's morning brief (debate): it already reasoned over the
+        # almanac, the strategy, and the agent's own recent runs, so it stands
+        # in place of the raw new-since memo below — one considered page, not
+        # two. Same slot, same "colleague not commander" posture.
+        brief = truncate_keep_head(magazine_text.strip(),
+                                   int(cfg.get("magazine_chars", 2500)))
+        sections.append(
+            "# LIBRARIAN'S MAGAZINE (your morning brief — read this first)\n"
+            "Your librarian worked ahead of you this morning: read the "
+            "strategy, your own recent runs, and the almanac, and left you "
+            "this. A colleague's brief, not an order — but if it says you "
+            "already tried something and why it failed, don't spend the turn "
+            "re-trying it.\n\n" + brief
+        )
+    elif cfg.get("almanac_enabled", False):
         from hermes import almanac as almanac_mod
         memo = almanac_mod.new_since(
             project.almanac_cursor(), int(cfg.get("almanac_memo_chars", 1500))
@@ -285,6 +313,14 @@ def retrospect_prompt() -> str:
 
 def almanac_prompt() -> str:
     return _template("almanac.md")
+
+
+def magazine_prompt() -> str:
+    return _template("magazine.md")
+
+
+def attempt_prompt() -> str:
+    return _template("attempt.md")
 
 
 def skills_nudge() -> str:

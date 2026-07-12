@@ -19,6 +19,15 @@ DEFAULT_MISSION = """\
 every run — keep it current. Edit freely.)
 """
 
+DEFAULT_STRATEGY = """\
+# Strategy
+
+(The general line this project is pursuing — the plan your day-to-day moves
+should serve, and the one the librarian checks each attempt against. Broader
+than a single request, narrower than the mission. Edit freely; `strategy`
+opens it.)
+"""
+
 _NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 
@@ -46,6 +55,14 @@ class Project:
     @property
     def directives_path(self) -> Path:
         return self.root / "directives.md"
+
+    @property
+    def strategy_path(self) -> Path:
+        """The campaign plan — operator-owned, like mission.md but the current
+        line rather than the standing purpose. Read by the agent and by the
+        librarian's magazine/attempt passes. Not auto-created: absent until the
+        operator writes one (`strategy`), and read as empty until then."""
+        return self.root / "strategy.md"
 
     @property
     def history_path(self) -> Path:
@@ -247,6 +264,9 @@ class Project:
 
     def read_directives(self) -> str:
         return self.directives_path.read_text() if self.directives_path.exists() else ""
+
+    def read_strategy(self) -> str:
+        return self.strategy_path.read_text() if self.strategy_path.exists() else ""
 
     def write_directives(self, text: str) -> None:
         self.directives_path.write_text(text.rstrip() + "\n")

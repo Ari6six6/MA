@@ -757,3 +757,72 @@ actually reaches him before he repeats himself.
   a gap in Feature 14's own delivery mechanism, not a new opt-in decision;
   `config almanac_enabled false` turns off both the index and the memo
   together, same as before.
+
+
+## Feature 17 — The librarian's magazine (king of the night)
+
+Origin: the operator, watching the agent in `debate` mode "keep coming back at
+the same strat — he repeats his own mistakes." The diagnosis was mechanical.
+The almanac's own end-of-run pass (Feature 14) only fires when this run's
+outcomes ledger shows a real failure — `_looks_failed` keys off ERROR/DENIED or
+a nonzero exit code. But a debate turn is *pure prose*: no tool call, no exit
+code. A strategically dead line looks clean, so nothing is ever banked, and
+since every turn is a fresh model instance with no conversation memory, the next
+turn re-proposes it. The librarian was asleep exactly when it was needed most.
+
+The operator's framing: make the librarian "the king of the night versus the
+agent, the king of the day." Behind the agent at the end of each turn; *ahead*
+of it at the start of the next — handing over a written brief (a "magazine",
+formerly "the memo") that says what the librarian knows before the agent walks
+into a high-intensity loop. And give it a plan to check moves against.
+
+- **`strategy.md` — a distinct campaign-plan file, not folded into mission or
+  directives.** The operator spoke of the strategy file and the directives file
+  as different things. Mission is the standing purpose; directives are standing
+  instructions (recency-reconciled); the strategy is the *current line* the
+  day-to-day moves should serve. It's operator-owned (like mission), read by the
+  agent (a `# STRATEGY` section right after `# MISSION`) and by both librarian
+  passes. Deliberately **not** auto-created in `ensure_layout` — absent, and
+  read as empty, until the operator writes one (`strategy edit` seeds the
+  template). That keeps the change zero-blast-radius for every existing project
+  and test: no strategy file, no new section.
+
+- **Two passes, the two halves of the same character** (`hermes/magazine.py`):
+  - *Morning (`compose`)* — synchronous, before `package.assemble`, so the brief
+    exists when the package is built. Reads strategy + mission + directives + the
+    agent's own recent summaries + the almanac; researches (web_search / GET
+    http_request) only when a fact would change the move; writes `magazine.md`.
+    Its stated first job is to catch the agent about to repeat a line already
+    found wanting.
+  - *Night (`register_attempt`)* — end of turn, inside `_librarian_passes`. Reads
+    the line the agent actually argued (its verbatim reply) and banks it to the
+    almanac. This is what closes Feature 14's debate blind spot: it's the only
+    record that a clean-looking prose line was tried, which is what lets the next
+    morning's brief say "you already argued this."
+
+- **The magazine stands in for the new-since memo, doesn't stack on it.** When a
+  magazine is in hand, `assemble` injects it in the same pre-request slot the
+  Feature 16 memo used and skips the raw `new_since` dump — the librarian already
+  reasoned over the almanac, so the agent gets one considered page, not two. Same
+  "colleague's brief, not an order" posture as the memo.
+
+- **Same store, same posture as the almanac.** The night pass banks through
+  `almanac_note` into the one global almanac — a repeated line refines its card
+  (Feature 14's supersede-don't-erase) rather than spawning a new one. Both
+  passes use their own narrow registry, a confirm that fails closed (so only
+  read-only GET research gets through), and never raise — a failed pass is a
+  no-op and the turn's result stands.
+
+- **Debate-scoped, behind `magazine_enabled` (off by default), threaded via a
+  `mode` argument.** `agent.run(..., mode="debate")` (set by `cmd_debate`) is the
+  gate for both passes; every other caller and every test is unchanged. The
+  morning pass adds a real LLM round-trip *before* each debate turn — that cost
+  (the librarian getting ahead) is the whole point, and it's why this is opt-in
+  and scoped to the one mode built for unhurried reasoning rather than every run.
+
+- **Ordering makes the loop close on its own.** In debate the end-of-turn passes
+  run in the background (`background_housekeeping`); the next turn's
+  `flush_housekeeping` joins them *before* it composes — so tonight's registered
+  line is already in the almanac when tomorrow's brief reads it. No extra
+  plumbing; it falls out of the Phase-2 correctness barrier that was already
+  there.

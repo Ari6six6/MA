@@ -509,6 +509,37 @@ run costs nothing beyond the (already-logged) outcomes ledger. Writing an
 entry is exclusive to this pass, the same split the catalog uses for
 `catalog_note`: the doer doesn't curate its own long-term record mid-task.
 
+### Feature 17 — The librarian's magazine (debate mode)
+
+The almanac above is the librarian working *behind* the agent, and it only wakes
+on a failed outcome. But a `debate` turn is pure prose — no exit code — so a
+strategically dead line looks clean and comes back word-perfect next time. The
+magazine is the other half: the librarian working *ahead* of the agent, and
+watching debate.
+
+Two passes, gated together on `magazine_enabled` and only in `debate` mode:
+
+- **Morning** — before the turn assembles, the librarian reads the strategy, the
+  agent's own recent runs, and the almanac (researching when a fact would change
+  the move) and writes `magazine.md`. It rides ahead of `# CURRENT REQUEST` in
+  place of the new-since memo, to catch a line the agent already tried.
+- **Night** — at end of turn, the librarian banks the line the agent actually
+  argued to the almanac, so the next morning's brief can catch the repeat.
+
+It checks moves against `strategy.md` — an operator-owned campaign plan (write it
+with `strategy edit`; `magazine` shows the current brief). Absent by default, so
+a project with no strategy adds nothing to the package.
+
+| Flag | Default | Effect |
+|---|---|---|
+| `magazine_enabled` | `false` | the morning brief + the night attempt-register, in `debate` mode |
+| `magazine_max_turns` | `8` | tool-call budget for the morning compose (research + the write) |
+| `magazine_register_max_turns` | `4` | tool-call budget for the end-of-turn attempt log |
+| `magazine_chars` | `2500` | budget for the magazine injected ahead of the request |
+
+Off by default and debate-scoped: the morning pass adds an LLM round-trip before
+each turn — the librarian getting ahead of you is the cost, and the point.
+
 ### Feature 15 — The narrator voice
 
 The outer voice, the opposite number of the inner voice. `<think>` is private

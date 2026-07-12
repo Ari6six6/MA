@@ -412,7 +412,7 @@ def cmd_debate(cfg, args: str) -> None:
                 ask_operator_fn=ask_stdin,
                 stall_nudges=0, phantom_nudges=0, extra_system=DEBATE_FRAMING,
                 on_run_started=lambda rid, _d: go_state.update_run_id(project.name, rid),
-                background_housekeeping=True,
+                background_housekeeping=True, mode="debate",
             )
             left = int(max(0, total - (time.monotonic() - started)) // 60)
             print(dim(f"— your turn — ~{left} min left at the table (`done` to end) —"))
@@ -1448,6 +1448,23 @@ def cmd_info(cfg, what: str, args: str) -> None:
             _edit_file(project.mission_path)
         else:
             print(project.read_mission())
+    elif what == "strategy":
+        # The campaign plan — operator-owned, seeded on first edit so the file
+        # opens with the template rather than blank. The librarian's magazine
+        # and attempt passes check the agent's moves against whatever's here.
+        if args.strip() == "edit":
+            from hermes.project import DEFAULT_STRATEGY
+            if not project.strategy_path.exists():
+                project.strategy_path.write_text(DEFAULT_STRATEGY)
+            _edit_file(project.strategy_path)
+        else:
+            print(project.read_strategy()
+                  or dim("(no strategy set — `strategy edit` to write one)"))
+    elif what == "magazine":
+        from hermes import magazine as magazine_mod
+        print(magazine_mod.read_magazine(project)
+              or dim("(no magazine yet — the librarian writes it at the start of "
+                     "a debate turn when `magazine_enabled` is on)"))
     elif what == "notes":
         print(project.read_notes() or dim("(no notes)"))
     elif what == "history":
@@ -1510,6 +1527,7 @@ HELP_MORE = f"""\
 {bold('Where your work lives')}
 {cyan('space')} new|use|list    a space is one workbench of work (its own mission, files, run history) {dim('(alias: p)')}
 {cyan('mission')} [edit]        the standing brief   ·   {cyan('notes')} / {cyan('history')} [n] / {cyan('summaries')} [n]
+{cyan('strategy')} [edit]       the campaign plan the librarian checks each move against   ·   {cyan('magazine')}  today's brief
 {cyan('catalog')} [now|log]     the librarian's index of your workspace — what each file is for
 {cyan('checkpoint')} [restore <id>]  snapshots taken before the agent changes files
 
@@ -1572,7 +1590,7 @@ def dispatch(cfg, line: str) -> bool:
         cmd_retrospect(cfg, rest)
     elif cmd == "catalog":
         cmd_catalog(cfg, rest)
-    elif cmd in ("mission", "notes", "history", "summaries"):
+    elif cmd in ("mission", "strategy", "magazine", "notes", "history", "summaries"):
         cmd_info(cfg, cmd, rest)
     elif cmd == "tools":
         cmd_tools(cfg)

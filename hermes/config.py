@@ -172,6 +172,20 @@ DEFAULTS: dict = {
     "almanac_max_turns": 6,  # tool-call budget for one pass (research + the write)
     "almanac_index_chars": 1200,  # budget for the almanac index in the system prompt
     "almanac_memo_chars": 1500,  # budget for the librarian memo (new-since-last-run) in the package
+    # The librarian's magazine (the forward brief): the almanac above is the
+    # librarian working BEHIND the agent (a post-mortem on failed outcomes).
+    # This is the other half — the librarian working AHEAD of it. In debate mode
+    # a synchronous morning pass reads the strategy, the agent's own recent
+    # runs, and the almanac (researching when a fact would change the move) and
+    # writes magazine.md, handed to the agent ahead of the request so it doesn't
+    # re-argue a settled line. At end of turn a night pass logs the line the
+    # agent actually argued to the almanac — debate turns have no exit code, so
+    # this is the only record a strategically dead line was tried, which is what
+    # lets the next morning's brief catch a repeat. Off by default; debate-scoped.
+    "magazine_enabled": False,
+    "magazine_max_turns": 8,  # tool-call budget for the morning compose (research + the write)
+    "magazine_register_max_turns": 4,  # tool-call budget for the end-of-turn attempt log
+    "magazine_chars": 2500,  # budget for the magazine injected ahead of the request
     # The narrator voice (feature 15): the outer voice, the opposite number of
     # inner_voice. The model may, at its own discretion via <narrate>...</narrate>,
     # describe the scene in story prose for the operator watching — instead of
